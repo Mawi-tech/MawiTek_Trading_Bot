@@ -1,5 +1,5 @@
 """
-iv_rank_bot.py  —  Strategy 2: IV Rank Scanner & Executor
+iv_rank_bot.py  -  Strategy 2: IV Rank Scanner & Executor
 
 IV Rank measures where current Implied Volatility sits relative to its
 own 52-week range:
@@ -7,9 +7,9 @@ own 52-week range:
     IV Rank = (IV_current - IV_52w_low) / (IV_52w_high - IV_52w_low) * 100
 
 Interpretation:
-    IVR >= 75  →  IV is elevated  →  SELL premium (credit spreads / iron condors)
-    IVR <= 25  →  IV is depressed →  BUY premium (long straddles / pre-event)
-    25–74      →  neutral         →  skip unless another catalyst present
+    IVR >= 75  ->  IV is elevated  ->  SELL premium (credit spreads / iron condors)
+    IVR <= 25  ->  IV is depressed ->  BUY premium (long straddles / pre-event)
+    25-74      ->  neutral         ->  skip unless another catalyst present
 
 Because Tradier doesn't expose a historical IV series, we approximate
 IV Rank using 30-day Historical Volatility (HV30) as a proxy for the
@@ -47,10 +47,10 @@ from risk_manager import pre_trade_check, calculate_contracts, record_trade
 from position_manager import record_entry
 
 
-# ─── Strategy Config ───────────────────────────────────────────────────────────
+# --- Strategy Config -----------------------------------------------------------
 
-IVR_SELL_THRESHOLD  = 75    # IVR >= this → sell premium candidate
-IVR_BUY_THRESHOLD   = 25    # IVR <= this → buy premium candidate
+IVR_SELL_THRESHOLD  = 75    # IVR >= this -> sell premium candidate
+IVR_BUY_THRESHOLD   = 25    # IVR <= this -> buy premium candidate
 TARGET_DTE_MIN      = 20    # Minimum DTE for credit spread legs
 TARGET_DTE_MAX      = 45    # Maximum DTE for credit spread legs
 MIN_ATM_IV          = 0.20  # Skip if ATM IV < 20% (too cheap to sell)
@@ -62,7 +62,7 @@ MIN_SETUP_SCORE     = 50    # Minimum score to execute
 SCAN_INTERVAL_SEC   = 300   # Re-scan every 5 minutes
 
 
-# ─── HV / IV Rank Calculation ──────────────────────────────────────────────────
+# --- HV / IV Rank Calculation --------------------------------------------------
 
 def _download_prices(ticker: str, period: str = "1y") -> pd.Series:
     """Return daily close prices as a float Series."""
@@ -146,7 +146,7 @@ def compute_iv_rank(ticker: str) -> dict:
     Returns:
         {
             "ticker":       str,
-            "iv_rank":      float  (0–100),
+            "iv_rank":      float  (0-100),
             "atm_iv":       float  (annualised, e.g. 0.35),
             "hv30_current": float,
             "hv30_52w_low": float,
@@ -176,7 +176,7 @@ def compute_iv_rank(ticker: str) -> dict:
     hv_high = float(hv_52w.max())
     hv_now  = float(hv.iloc[-1])
 
-    # 3. ATM IV from Tradier (MOCK_MODE → fall back to HV as IV proxy)
+    # 3. ATM IV from Tradier (MOCK_MODE -> fall back to HV as IV proxy)
     atm_iv = get_atm_iv(ticker)
     if atm_iv is None:
         # Use current HV as proxy when broker data unavailable
@@ -191,7 +191,7 @@ def compute_iv_rank(ticker: str) -> dict:
     # 4. IV Rank against HV distribution
     iv_range = hv_high - hv_low
     if iv_range < 0.01:
-        iv_rank = 50.0   # Flat vol regime — call it neutral
+        iv_rank = 50.0   # Flat vol regime - call it neutral
     else:
         iv_rank = max(0.0, min(100.0, (atm_iv - hv_low) / iv_range * 100))
 
@@ -205,7 +205,7 @@ def compute_iv_rank(ticker: str) -> dict:
 
     print(
         f"[IVRank] {ticker} | IVR: {iv_rank:.1f} | ATM IV: {atm_iv:.1%} | "
-        f"HV30: {hv_now:.1%} | 52W HV [{hv_low:.1%}–{hv_high:.1%}] | "
+        f"HV30: {hv_now:.1%} | 52W HV [{hv_low:.1%}-{hv_high:.1%}] | "
         f"Signal: {signal}"
     )
 
@@ -221,11 +221,11 @@ def compute_iv_rank(ticker: str) -> dict:
     }
 
 
-# ─── Setup Scoring ─────────────────────────────────────────────────────────────
+# --- Setup Scoring -------------------------------------------------------------
 
 def score_iv_setup(iv_rank: float, atm_iv: float, signal: str) -> int:
     """
-    Composite score 0–100 for an IV Rank setup.
+    Composite score 0-100 for an IV Rank setup.
 
     Sell-premium setups score higher at very high IVR.
     Buy-premium setups score higher at very low IVR.
@@ -243,7 +243,7 @@ def score_iv_setup(iv_rank: float, atm_iv: float, signal: str) -> int:
         elif iv_rank >= 75:
             score += 20
 
-        # Absolute IV level (up to 30 pts — prefer fat premium)
+        # Absolute IV level (up to 30 pts - prefer fat premium)
         if atm_iv >= 0.80:
             score += 30
         elif atm_iv >= 0.60:
@@ -253,7 +253,7 @@ def score_iv_setup(iv_rank: float, atm_iv: float, signal: str) -> int:
         elif atm_iv >= 0.30:
             score += 10
 
-        # DTE available within window (up to 20 pts — static bonus)
+        # DTE available within window (up to 20 pts - static bonus)
         score += 20
 
     elif signal == "buy_premium":
@@ -282,7 +282,7 @@ def score_iv_setup(iv_rank: float, atm_iv: float, signal: str) -> int:
     return min(score, 100)
 
 
-# ─── Option Leg Selector ───────────────────────────────────────────────────────
+# --- Option Leg Selector -------------------------------------------------------
 
 def _spread_quality(bid: float, ask: float) -> float:
     mid = (bid + ask) / 2
@@ -413,7 +413,7 @@ def _select_long_straddle(
 ) -> dict | None:
     """
     Long straddle: buy ATM call + buy ATM put.
-    Used when IV is low — pay cheap premium before expected vol expansion.
+    Used when IV is low - pay cheap premium before expected vol expansion.
     """
     calls = [c for c in chain if c.get("option_type") == "call"]
     puts  = [c for c in chain if c.get("option_type") == "put"]
@@ -463,7 +463,7 @@ def _select_long_straddle(
     }
 
 
-# ─── Trade Execution ───────────────────────────────────────────────────────────
+# --- Trade Execution -----------------------------------------------------------
 
 def execute_iv_rank_trade(setup: dict) -> bool:
     """
@@ -541,12 +541,12 @@ def _execute_bull_put(ticker: str, legs: dict, budget: float) -> bool:
         ),
     )
     if buy_order.get("status") == "error":
-        print(f"[IVRank] Buy leg failed — spread is now naked! Close sell leg manually.")
+        print(f"[IVRank] Buy leg failed - spread is now naked! Close sell leg manually.")
         return False
 
     record_trade(ticker)
     print(
-        f"[IVRank] ✅ Bull-put spread placed | {ticker} | "
+        f"[IVRank] [OK] Bull-put spread placed | {ticker} | "
         f"${legs['sell_strike']}P / ${legs['buy_strike']}P | "
         f"x{quantity} | Credit: ${legs['net_credit']:.2f}/contract"
     )
@@ -579,13 +579,13 @@ def _execute_straddle(ticker: str, legs: dict, budget: float) -> bool:
 
     record_trade(ticker)
     print(
-        f"[IVRank] ✅ Long straddle placed | {ticker} | "
+        f"[IVRank] [OK] Long straddle placed | {ticker} | "
         f"x{quantity} | Debit: ${legs['total_debit']:.2f}"
     )
     return True
 
 
-# ─── Main Scanner ──────────────────────────────────────────────────────────────
+# --- Main Scanner --------------------------------------------------------------
 
 def run_iv_rank_scan(
     csv_path: str | None = "sp500.csv",
@@ -604,7 +604,7 @@ def run_iv_rank_scan(
     Returns list of setup dicts sorted by score descending.
     """
     print("\n" + "=" * 60)
-    print("  IV RANK SCANNER  —  Strategy 2")
+    print("  IV RANK SCANNER  -  Strategy 2")
     print(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60 + "\n")
 
@@ -647,7 +647,7 @@ def run_iv_rank_scan(
         }
         results.append(result)
         print(
-            f"[IVRank] ✅ {ticker} | Score: {score}/100 | "
+            f"[IVRank] [OK] {ticker} | Score: {score}/100 | "
             f"IVR: {iv_rank:.1f} | Signal: {signal}"
         )
 
@@ -657,12 +657,12 @@ def run_iv_rank_scan(
     print(f"  TOP IV RANK SETUPS ({len(results)} found)")
     print("=" * 60)
     for i, r in enumerate(results, 1):
-        arrow = "🔴 SELL PREMIUM" if r["signal"] == "sell_premium" else "🟢 BUY PREMIUM"
+        arrow = "[!] SELL PREMIUM" if r["signal"] == "sell_premium" else "[+] BUY PREMIUM"
         print(
             f"\n#{i} {r['ticker']} | Score: {r['setup_score']}/100 | {arrow}"
             f"\n    IVR: {r['iv_rank']:.1f} | ATM IV: {r['atm_iv']:.1f}% | "
             f"HV30: {r['hv30_current']:.1f}% "
-            f"[52W: {r['hv30_52w_low']:.1f}%–{r['hv30_52w_high']:.1f}%]"
+            f"[52W: {r['hv30_52w_low']:.1f}%-{r['hv30_52w_high']:.1f}%]"
         )
 
     if output_csv and results:
@@ -674,7 +674,7 @@ def run_iv_rank_scan(
     return results
 
 
-# ─── Bot Loop ──────────────────────────────────────────────────────────────────
+# --- Bot Loop ------------------------------------------------------------------
 
 def run():
     """
@@ -682,24 +682,24 @@ def run():
     Scans, scores, and executes IV Rank trades on a repeating timer.
     """
     print("\n" + "=" * 60)
-    print("  IV RANK BOT  —  Strategy 2  —  STARTING")
+    print("  IV RANK BOT  -  Strategy 2  -  STARTING")
     print(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     if MOCK_MODE:
-        print("  ⚠  MOCK_MODE — no real orders will be placed")
+        print("  [!]  MOCK_MODE - no real orders will be placed")
     print("=" * 60)
 
     while True:
         try:
             now = datetime.datetime.now()
             if now.weekday() >= 5:
-                print("[IVRank] Weekend — sleeping 1h")
+                print("[IVRank] Weekend - sleeping 1h")
                 time.sleep(3600)
                 continue
 
             market_open  = now.replace(hour=9,  minute=35, second=0)
             market_close = now.replace(hour=15, minute=30, second=0)
             if not (market_open <= now <= market_close):
-                print("[IVRank] Market closed — sleeping 60s")
+                print("[IVRank] Market closed - sleeping 60s")
                 time.sleep(60)
                 continue
 
@@ -716,7 +716,7 @@ def run():
             print("\n[IVRank] Stopped by user.")
             break
         except Exception as e:
-            print(f"[IVRank] Error: {e} — retrying in 60s")
+            print(f"[IVRank] Error: {e} - retrying in 60s")
             time.sleep(60)
             continue
 
@@ -725,7 +725,7 @@ def run():
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="IV Rank Scanner — Strategy 2")
+    parser = argparse.ArgumentParser(description="IV Rank Scanner - Strategy 2")
     parser.add_argument("--scan-only", action="store_true",
                         help="Run one scan cycle and print results, no execution")
     parser.add_argument("--limit",     type=int, default=UNIVERSE_LIMIT,

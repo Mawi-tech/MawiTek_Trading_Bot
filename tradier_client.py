@@ -200,7 +200,11 @@ def get_options_chain(ticker: str, expiration: str) -> list[dict]:
 
 
 def get_quote(ticker: str) -> float:
-    """Last price for a stock. MOCK_MODE returns 0.0."""
+    """
+    Last price for a stock. MOCK_MODE returns 0.0.
+    Tradier sometimes returns "last": null (no trade since open / closed market) —
+    fall back to the prevclose so callers always get a usable number.
+    """
     if MOCK_MODE:
         return 0.0
 
@@ -211,7 +215,16 @@ def get_quote(ticker: str) -> float:
         r.raise_for_status()
         data = r.json()
         quote = data.get("quotes", {}).get("quote", {})
-        return float(quote.get("last", 0))
+        if not isinstance(quote, dict):
+            return 0.0
+        for field in ("last", "close", "prevclose", "bid", "ask"):
+            val = quote.get(field)
+            if val not in (None, "", 0, "0"):
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
     except Exception as e:
         print(f"[Tradier] Error fetching quote for {ticker}: {e}")
         return 0.0
