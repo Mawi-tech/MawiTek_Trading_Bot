@@ -1,0 +1,62 @@
+# ============================================================================
+# MawiTek Trading Bot — .gitignore
+# ============================================================================
+
+# ── Secrets (NEVER commit) ─────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+
+# ── Persistent state files (machine-local) ────────────────────────────────
+risk_state.json
+pnl_history.json
+positions.json
+dashboard_state.json
+.universe_state.json
+
+# ── Logs ──────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Backtest outputs ──────────────────────────────────────────────────────
+backtest_hft_*.csv
+setups_*.csv
+iv_rank_*.csv
+
+# ── Python build / cache ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Virtual environments ──────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── IDE / editor ──────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Jupyter notebooks (if any) ────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── OS junk ──────────────────────────────────────────────────────────────
+desktop.ini
