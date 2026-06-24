@@ -157,6 +157,29 @@ def get_orders_today() -> list[dict]:
         return []
 
 
+# Order statuses that mean the order is still working at the broker.
+_WORKING_ORDER_STATUSES = {"open", "pending", "partially_filled", "submitted", "accepted", "calculated", "queued"}
+
+
+def get_open_orders() -> list[dict]:
+    """All currently working (cancelable) orders. MOCK_MODE returns []."""
+    if MOCK_MODE:
+        return []
+
+    url = f"{BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        r.raise_for_status()
+        orders = _safe_inner(r.json(), "orders", "order")
+        return [
+            o for o in orders
+            if isinstance(o, dict) and str(o.get("status", "")).lower() in _WORKING_ORDER_STATUSES
+        ]
+    except Exception as e:
+        print(f"[Tradier] Error fetching open orders: {e}")
+        return []
+
+
 # ─── Options Chain ─────────────────────────────────────────────────────────────
 
 def get_options_expirations(ticker: str) -> list[str]:
@@ -199,6 +222,100 @@ def get_options_chain(ticker: str, expiration: str) -> list[dict]:
         return []
 
 
+def get_option_mid(option_symbol: str, underlying: str, expiration: str) -> float:
+    """
+    Live mid price for one option contract, looked up from its chain.
+
+    Returns (bid + ask) / 2 when both sides quote; falls back to whichever
+    single side is available; 0.0 if the contract can't be priced. This is the
+    one place option mid-pricing lives — position_manager, equity_tracker,
+    dashboard_state and iv_rank_bot all use it.
+    """
+    try:
+        for contract in get_options_chain(underlying, expiration):
+            if contract.get("symbol") == option_symbol:
+                bid = float(contract.get("bid", 0) or 0)
+                ask = float(contract.get("ask", 0) or 0)
+                if bid > 0 and ask > 0:
+                    return (bid + ask) / 2
+                return ask or bid or 0.0
+    except Exception as e:
+        print(f"[Tradier] Error pricing {option_symbol}: {e}")
+    return 0.0
+
+
+def get_quotes(symbols: list[str]) -> dict[str, float]:
+    """
+    Last price for MANY stocks in one call (Tradier /markets/quotes takes a
+    comma-separated list). Returns {symbol: price}; symbols that can't be priced
+    are omitted. MOCK_MODE returns {}. Chunked so a long list can't blow the URL.
+    """
+    out: dict[str, float] = {}
+    if MOCK_MODE or not symbols:
+        return out
+
+    url = f"{BASE_URL}/markets/quotes"
+    CHUNK = 100
+    for i in range(0, len(symbols), CHUNK):
+        batch = symbols[i:i + CHUNK]
+        try:
+            r = requests.get(url, headers=HEADERS,
+                             params={"symbols": ",".join(batch)}, timeout=10)
+            r.raise_for_status()
+            quotes = r.json().get("quotes", {}).get("quote", [])
+            if isinstance(quotes, dict):
+                quotes = [quotes]
+            for q in quotes:
+                sym = q.get("symbol")
+                if not sym:
+                    continue
+                for field in ("last", "close", "prevclose", "bid", "ask"):
+                    val = q.get(field)
+                    if val not in (None, "", 0, "0"):
+                        try:
+                            out[sym] = float(val)
+                            break
+                        except (TypeError, ValueError):
+                            continue
+        except Exception as e:
+            print(f"[Tradier] Error fetching quotes batch: {e}")
+    return out
+
+
+def get_chain_greeks(underlying: str, expiration: str) -> dict[str, dict]:
+    """
+    Per-contract greeks for a whole expiration, keyed by OCC option symbol.
+
+    Tradier returns greeks (delta/gamma/theta/vega/rho + mid_iv, via ORATS) on
+    each contract when the chain is requested with greeks=true — which
+    get_options_chain already does. This fetches the chain ONCE and maps each
+    symbol to its greeks, so the portfolio-greeks aggregation can price a whole
+    underlying+expiry group with a single API call.
+
+    Returns {symbol: {"delta","gamma","theta","vega","iv"}}. MOCK_MODE → {}.
+    Contracts with no greeks block (illiquid / unpriced) are skipped.
+    """
+    out: dict[str, dict] = {}
+    if MOCK_MODE:
+        return out
+    try:
+        for contract in get_options_chain(underlying, expiration):
+            sym = contract.get("symbol")
+            g = contract.get("greeks") or {}
+            if not sym or not g:
+                continue
+            out[sym] = {
+                "delta": float(g.get("delta", 0) or 0),
+                "gamma": float(g.get("gamma", 0) or 0),
+                "theta": float(g.get("theta", 0) or 0),
+                "vega":  float(g.get("vega", 0) or 0),
+                "iv":    float(g.get("mid_iv", 0) or 0),
+            }
+    except Exception as e:
+        print(f"[Tradier] Error fetching greeks for {underlying} {expiration}: {e}")
+    return out
+
+
 def get_quote(ticker: str) -> float:
     """
     Last price for a stock. MOCK_MODE returns 0.0.
@@ -239,9 +356,17 @@ def place_option_order(
     quantity: int,
     order_type: str = "market",
     price: float | None = None,
-    duration: str = "day"
+    duration: str = "day",
+    tag: str | None = None,
 ) -> dict:
-    """Place an options order. In MOCK_MODE refuses politely."""
+    """
+    Place an options order. In MOCK_MODE refuses politely.
+
+    `tag` is an optional client-side identifier (alphanumeric, max 255 chars)
+    echoed back by Tradier on the order record. Used for idempotency — the
+    bot can scan open/recent orders for a tag to detect whether an order it
+    tried to place actually went through after a crash.
+    """
     if MOCK_MODE:
         msg = "MOCK_MODE: cannot place real orders without TRADIER_API_KEY"
         print(f"[Tradier] {msg} | Would have placed: {side} {quantity}x {option_symbol}")
@@ -261,6 +386,12 @@ def place_option_order(
 
     if order_type == "limit" and price:
         payload["price"] = str(round(price, 2))
+
+    if tag:
+        # Tradier only accepts [A-Za-z0-9-] in tags; sanitize defensively.
+        clean = "".join(c for c in tag if c.isalnum() or c == "-")[:255]
+        if clean:
+            payload["tag"] = clean
 
     try:
         r = requests.post(url, headers=HEADERS, data=payload, timeout=10)
@@ -283,6 +414,56 @@ def place_option_order(
         return {"status": "error", "error": str(e)}
 
 
+def get_order_status(order_id: str | int) -> dict:
+    """
+    Fetch the current state of a single order by ID.
+
+    Returns the Tradier order dict, which includes:
+        status            "open" | "filled" | "partially_filled" |
+                          "pending" | "rejected" | "canceled" | "expired"
+        avg_fill_price    average fill price across executions
+        exec_quantity     contracts filled so far
+        remaining_quantity contracts still working
+        last_fill_price / last_fill_quantity
+
+    On error or in MOCK_MODE returns {"status": "error", "error": ...}.
+    """
+    if MOCK_MODE:
+        return {"status": "error", "error": "MOCK_MODE: no live orders"}
+
+    url = f"{BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{order_id}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        order = data.get("order", {})
+        return order if isinstance(order, dict) else {"status": "error", "error": "unexpected response"}
+    except Exception as e:
+        print(f"[Tradier] Error fetching order {order_id}: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+def find_orders_by_tag(tag: str) -> list[dict]:
+    """
+    Return all orders (open or historical for the session) carrying a given
+    client tag. Used for idempotency — after a crash the bot can check
+    whether the order it was about to place already exists at the broker.
+    """
+    if MOCK_MODE or not tag:
+        return []
+
+    clean = "".join(c for c in tag if c.isalnum() or c == "-")[:255]
+    url = f"{BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        r.raise_for_status()
+        orders = _safe_inner(r.json(), "orders", "order")
+        return [o for o in orders if isinstance(o, dict) and str(o.get("tag", "")) == clean]
+    except Exception as e:
+        print(f"[Tradier] Error searching orders by tag: {e}")
+        return []
+
+
 def cancel_order(order_id: str) -> bool:
     """Cancel an open order by ID. MOCK_MODE returns False."""
     if MOCK_MODE:
@@ -297,3 +478,26 @@ def cancel_order(order_id: str) -> bool:
     except Exception as e:
         print(f"[Tradier] Error cancelling order {order_id}: {e}")
         return False
+
+
+# ─── Gain/Loss History ────────────────────────────────────────────────────────
+
+def get_gainloss() -> list[dict]:
+    """
+    Fetch closed-position gain/loss records from the broker.
+    Each item represents a closed lot with entry/exit data and P&L.
+    Used to populate the Trade History tab when the local journal is empty.
+
+    MOCK_MODE returns [].
+    """
+    if MOCK_MODE:
+        return []
+
+    url = f"{BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/gainloss"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        r.raise_for_status()
+        return _safe_inner(r.json(), "gainloss", "closed_position")
+    except Exception as e:
+        print(f"[Tradier] Error fetching gain/loss: {e}")
+        return []

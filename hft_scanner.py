@@ -9,7 +9,10 @@ Signals detected:
     1. VWAP Reclaim    — price crosses above VWAP after a dip, with vol surge
     2. Opening Range Breakout (ORB) — price breaks the first 15-min high/low
     3. Volume Spike    — sudden vol >= 3x rolling average on up-bar
-    4. Momentum Burst  — short-term ROC + RSI confirmation
+    4. Momentum Burst  — short-term ROC + fast RSI(9) confirmation
+    5. Range Breakout  — break of last N-bar consolidation range
+    6. VWAP Bounce     — trend pullback that holds VWAP as support
+    7. Strong Bar      — close near the bar's extreme (price action conviction)
 
 Each signal is scored 0–100. Only setups >= MIN_SIGNAL_SCORE are returned.
 
@@ -24,14 +27,18 @@ Usage:
 
 import datetime
 import math
+import time
 import argparse
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 from universe import load_universe
 from market_filter import filter_universe
+from market_data import get_intraday_bars
+from logger import get_logger
+
+log = get_logger("hft_scanner")
 
 
 # ─── Config ────────────────────────────────────────────────────────────────────
@@ -41,18 +48,53 @@ DEFAULT_PERIOD      = "1d"      # How far back to pull (intraday max 7d)
 ORB_MINUTES         = 15        # Opening range window in minutes
 VWAP_VOL_MULT       = 2.0       # Min vol multiplier for VWAP reclaim signal
 SPIKE_VOL_MULT      = 3.0       # Min vol multiplier for raw spike signal
-MIN_SIGNAL_SCORE    = 60        # Minimum score to include in output
-UNIVERSE_LIMIT      = 75        # Symbols to scan per cycle
+MIN_SIGNAL_SCORE    = 45        # Minimum score to include in output (50→45 Jun 2026 — trade-frequency push)
+UNIVERSE_LIMIT      = 250       # Symbols to scan per cycle (wider = more setups)
 MIN_PRICE           = 5.0       # Skip penny stocks
 MIN_AVG_VOLUME      = 1_000_000 # Liquidity floor (daily avg shares)
-MIN_DOLLAR_VOLUME   = 10_000_000
+MIN_DOLLAR_VOLUME   = 20_000_000   # cut micro-caps / thin names (matches the universe screen)
+
+# How many CORE directional signals must fire together to qualify a setup.
+# The floor runs over the 5 core signals (vwap, orb, spike, range, bounce).
+#   History: the original strategy hard-required all THREE of VWAP+ORB+Spike.
+#   Jun 2026 backtests: a floor of 3 was positive on two independent samples
+#   (PF ~1.6); a floor of 2 was positive on one sample but negative on the
+#   other (mixed evidence, not strictly a loser).
+#   Jun 10 2026 LIVE finding: with the floor at 3 the scanner produced ~1
+#   setup per DAY (871 consecutive zero-setup scans) — the bot effectively
+#   never day-trades. Per user decision, frequency wins: floor lowered to 2,
+#   with the existing risk rails as the safety net — setups without the
+#   proven VWAP+ORB+Spike trio are "relaxed" conviction and trade at HALF
+#   size (HFT_SIZE_PCT_RELAXED), plus the tight -20% stop and daily-loss halt.
+# RE-RUN backtest_hft.py after changing this to validate.
+HFT_MIN_CONFLUENCE  = 2
+RANGE_LOOKBACK      = 12        # bars for the intraday range-breakout trigger (12×5m = 1h)
+
+# Bidirectional (long + short) signal generation.
+# Four of the core detectors (vwap reclaim, volume spike, momentum burst, vwap
+# bounce) historically fired LONG only, giving the strategy a structural long
+# bias and far fewer setups in down-trending sessions. When this is True they
+# also emit the mirror-image BEARISH signal (VWAP rejection, distribution spike,
+# down-momentum, VWAP resistance-reject), direction resolution becomes a weighted
+# vote across all directional signals, and composite scoring only counts a signal
+# toward a setup when its direction agrees.
+#
+# DEFAULT FALSE so the live path is unchanged until validated. Flip to True only
+# after backtest_hft.py --bidirectional confirms it isn't worse than long-only.
+ENABLE_BIDIRECTIONAL_SIGNALS = False
 
 # ── Session gate ───────────────────────────────────────────────────────────────
 # Only fire signals during "prime time" — avoids opening noise and EOD entries
-# that carry overnight and gap against us.  Times are UTC.
-# 10:00 AM EST = 14:00 UTC  |  2:30 PM EST = 18:30 UTC
-PRIME_SESSION_START_UTC = datetime.time(14, 0)   # 10:00 AM EST
-PRIME_SESSION_END_UTC   = datetime.time(18, 30)  # 2:30 PM EST
+# that carry overnight and gap against us.  Times are US/Eastern (ET).
+# Tradier timesales returns timezone-naive ET timestamps; compare directly.
+# 9:45 AM ET:  the 15-min opening range has just completed — this is exactly
+#              when ORB breakouts trigger, so starting later (the old 10:00)
+#              missed the strategy's best morning-momentum entries.
+# 2:45 PM ET:  leaves >=30 min before the EOD flatten (3:15) for a position to
+#              develop. Entries after this carry too little runway.
+# Widened from 10:00–14:30 (Jun 2026) as part of the trade-frequency push.
+PRIME_SESSION_START_ET = datetime.time(9, 45)   # 9:45 AM ET
+PRIME_SESSION_END_ET   = datetime.time(14, 45)  # 2:45 PM ET
 
 # Inverse / leveraged-inverse ETFs: bullish momentum signals are structurally
 # wrong on these instruments.  The executor will skip any ticker on this list.
@@ -64,42 +106,87 @@ INVERSE_ETF_LIST = {
 # EMA window used for trend alignment filter
 TREND_EMA_WINDOW = 20
 
+# RSI window for the momentum burst signal.  9 reacts faster than the
+# standard 14 — appropriate for intraday scalp timeframes.
+RSI_FAST_WINDOW = 9
+
 
 # ─── Data Fetching ─────────────────────────────────────────────────────────────
+
+# Bar interval → seconds, used to size the intraday fetch cache TTL.
+_INTERVAL_SECONDS = {
+    "1m": 60, "1min": 60,
+    "2m": 120,
+    "5m": 300, "5min": 300,
+    "15m": 900, "15min": 900,
+}
+
+# Per-(ticker, interval) cache of the last fetched intraday DataFrame.
+# The HFT loop re-scans every SCAN_INTERVAL_SEC (60s), but a 5m bar only changes
+# every 300s — so 4 of every 5 fetches used to return the SAME bars and recompute
+# identical signals. We reuse a cached fetch until ~80% of the bar interval has
+# elapsed, cutting intraday API calls ~5x while still refreshing before each new
+# bar prints. Module-level (per-process); the backtest never calls fetch_intraday.
+_intraday_cache: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
+
+
+def _intraday_cache_ttl(interval: str) -> float:
+    """Reuse a cached fetch for ~80% of the bar interval (so we refresh just
+    before the next bar appears rather than once per 60s loop)."""
+    return _INTERVAL_SECONDS.get(interval, 300) * 0.8
+
+
+def clear_intraday_cache() -> None:
+    """Drop all cached intraday fetches (e.g. on a new session or in tests)."""
+    _intraday_cache.clear()
+
 
 def fetch_intraday(ticker: str, interval: str = DEFAULT_INTERVAL,
                    period: str = DEFAULT_PERIOD) -> pd.DataFrame:
     """
-    Pull intraday OHLCV bars from yfinance.
+    Pull intraday OHLCV bars via Tradier timesales, with a short TTL cache.
+
+    A cached DataFrame is reused while it is still fresh for the bar interval
+    (see _intraday_cache_ttl) so repeated scan cycles don't re-download bars
+    that haven't changed. Empty results are never cached (transient failure /
+    closed market) so they can be retried immediately.
+
     Returns a clean DataFrame with columns: Open, High, Low, Close, Volume.
-    Returns empty DataFrame on any failure.
+    Returns empty DataFrame on any failure or when market is closed.
     """
-    try:
-        df = yf.download(
-            tickers=ticker,
-            interval=interval,
-            period=period,
-            auto_adjust=True,
-            progress=False,
-            threads=False,
-        )
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [c[0] for c in df.columns]
-        df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
-        df.index = pd.to_datetime(df.index)
+    key = (ticker, interval)
+    cached = _intraday_cache.get(key)
+    if cached is not None and (time.time() - cached[0]) < _intraday_cache_ttl(interval):
+        return cached[1]
+
+    # Convert period string to calendar days (default "1d" → 1 day)
+    days_map = {"1d": 1, "2d": 2, "5d": 5, "1wk": 7}
+    days = days_map.get(period, 1)
+    df = get_intraday_bars(ticker, interval=interval, days=days)
+    if df.empty:
+        log.debug("No intraday data for %s (%s)", ticker, interval)
         return df
-    except Exception as e:
-        print(f"[HFT Scanner] Error fetching {ticker} ({interval}): {e}")
-        return pd.DataFrame()
+
+    _intraday_cache[key] = (time.time(), df)
+    return df
 
 
 # ─── Indicators ────────────────────────────────────────────────────────────────
 
 def compute_vwap(df: pd.DataFrame) -> pd.Series:
-    """Intraday VWAP (reset per trading day)."""
+    """
+    Intraday VWAP, reset per trading day.
+
+    The cumulative sums are grouped by calendar date because fetch_intraday's
+    1-day window actually spans TWO sessions on Tue–Fri (it starts at
+    yesterday 9:30). A plain cumsum() would anchor today's VWAP at yesterday's
+    open — a different line than the per-session VWAP the strategy was
+    backtested on (backtest_hft slices per session for exactly this reason).
+    """
     typical = (df["High"] + df["Low"] + df["Close"]) / 3
-    cum_tpv = (typical * df["Volume"]).cumsum()
-    cum_vol = df["Volume"].cumsum()
+    day = df.index.date
+    cum_tpv = (typical * df["Volume"]).groupby(day).cumsum()
+    cum_vol = df["Volume"].groupby(day).cumsum()
     return cum_tpv / cum_vol.replace(0, np.nan)
 
 
@@ -125,18 +212,19 @@ def is_prime_session(bar_time: pd.Timestamp) -> bool:
     """
     Returns True when the bar falls inside the prime intraday window.
 
-    yfinance returns timestamps in UTC for US equities.
-    Prime window: 10:00 AM – 2:30 PM EST  =  14:00 – 18:30 UTC.
+    Tradier timesales returns US/Eastern timestamps (timezone-naive in the
+    DataFrame).  Compare directly against ET boundaries — no UTC conversion.
+    Prime window: PRIME_SESSION_START_ET – PRIME_SESSION_END_ET
+    (currently 9:45 AM – 2:45 PM ET).
 
     Bars outside this window are:
-      - Pre/post-market noise        (before 14:00 UTC)
-      - EOD setups that carry overnight  (after 18:30 UTC)
+      - Opening-range formation noise            (before the start)
+      - EOD entries with too little runway left  (after the end)
     """
     try:
         t = bar_time.time()
-        # Strip timezone info for comparison if present
         t = datetime.time(t.hour, t.minute, t.second)
-        return PRIME_SESSION_START_UTC <= t <= PRIME_SESSION_END_UTC
+        return PRIME_SESSION_START_ET <= t <= PRIME_SESSION_END_ET
     except Exception:
         return True   # Fail open — don't block on timezone edge cases
 
@@ -218,13 +306,14 @@ def get_opening_range(df: pd.DataFrame, orb_minutes: int = ORB_MINUTES
 
 def detect_vwap_reclaim(df: pd.DataFrame, vwap: pd.Series) -> dict:
     """
-    VWAP Reclaim: last bar closed above VWAP after at least one bar below,
-    with volume >= VWAP_VOL_MULT × rolling average.
+    VWAP Reclaim (bullish): last bar closed ABOVE VWAP after a bar below.
+    VWAP Rejection (bearish, bidirectional mode): closed BELOW VWAP after a bar
+    above. Both require volume >= VWAP_VOL_MULT × rolling average to score full.
 
-    Returns: {"signal": bool, "score": int, "detail": str}
+    Returns: {"signal": bool, "score": int, "detail": str, "direction": str}
     """
     if len(df) < 5:
-        return {"signal": False, "score": 0, "detail": "insufficient bars"}
+        return {"signal": False, "score": 0, "detail": "insufficient bars", "direction": "none"}
 
     close   = df["Close"]
     vol     = df["Volume"]
@@ -237,29 +326,40 @@ def detect_vwap_reclaim(df: pd.DataFrame, vwap: pd.Series) -> dict:
     last_vol   = float(vol.iloc[-1])
     avg_vol    = float(vol_avg.iloc[-1]) if not math.isnan(float(vol_avg.iloc[-1])) else 1
 
-    # Crossover: prev below VWAP, current above
-    crossed = (prev_close < prev_vwap) and (last_close > last_vwap)
+    up_cross   = (prev_close < prev_vwap) and (last_close > last_vwap)
+    down_cross = (prev_close > prev_vwap) and (last_close < last_vwap)
     vol_confirmed = (avg_vol > 0) and (last_vol / avg_vol >= VWAP_VOL_MULT)
-
-    if not crossed:
-        return {"signal": False, "score": 0, "detail": "no VWAP crossover"}
-
-    score = 30  # Base for crossover
-    if vol_confirmed:
-        score += 30
     vol_ratio = round(last_vol / avg_vol, 2) if avg_vol > 0 else 0
-    pct_above = round((last_close - last_vwap) / last_vwap * 100, 2) if last_vwap > 0 else 0
 
-    if pct_above >= 0.5:
-        score += 20
-    elif pct_above >= 0.2:
-        score += 10
+    if up_cross:
+        score = 30
+        if vol_confirmed:
+            score += 30
+        pct = round((last_close - last_vwap) / last_vwap * 100, 2) if last_vwap > 0 else 0
+        if pct >= 0.5:
+            score += 20
+        elif pct >= 0.2:
+            score += 10
+        return {
+            "signal": True, "score": min(score, 80), "direction": "bullish",
+            "detail": f"VWAP reclaim | vol {vol_ratio:.1f}x avg | +{pct:.2f}% above VWAP",
+        }
 
-    return {
-        "signal": True,
-        "score":  min(score, 80),
-        "detail": f"VWAP reclaim | vol {vol_ratio:.1f}x avg | +{pct_above:.2f}% above VWAP",
-    }
+    if ENABLE_BIDIRECTIONAL_SIGNALS and down_cross:
+        score = 30
+        if vol_confirmed:
+            score += 30
+        pct = round((last_vwap - last_close) / last_vwap * 100, 2) if last_vwap > 0 else 0
+        if pct >= 0.5:
+            score += 20
+        elif pct >= 0.2:
+            score += 10
+        return {
+            "signal": True, "score": min(score, 80), "direction": "bearish",
+            "detail": f"VWAP rejection | vol {vol_ratio:.1f}x avg | -{pct:.2f}% below VWAP",
+        }
+
+    return {"signal": False, "score": 0, "detail": "no VWAP crossover", "direction": "none"}
 
 
 def detect_orb_breakout(df: pd.DataFrame) -> dict:
@@ -318,27 +418,31 @@ def detect_orb_breakout(df: pd.DataFrame) -> dict:
 
 def detect_volume_spike(df: pd.DataFrame) -> dict:
     """
-    Standalone volume spike on an up-bar (close > open).
+    Standalone volume spike (>= SPIKE_VOL_MULT × rolling average):
+      bullish — on an UP bar (close > open): accumulation.
+      bearish (bidirectional mode) — on a DOWN bar (close < open): distribution.
 
-    Returns: {"signal": bool, "score": int, "detail": str}
+    Returns: {"signal": bool, "score": int, "detail": str, "direction": str}
     """
     if len(df) < 10:
-        return {"signal": False, "score": 0, "detail": "insufficient bars"}
+        return {"signal": False, "score": 0, "detail": "insufficient bars", "direction": "none"}
 
     last  = df.iloc[-1]
     vol   = df["Volume"]
     vol_avg = float(compute_rolling_vol_avg(vol).iloc[-1])
 
     if math.isnan(vol_avg) or vol_avg <= 0:
-        return {"signal": False, "score": 0, "detail": "vol avg unavailable"}
+        return {"signal": False, "score": 0, "detail": "vol avg unavailable", "direction": "none"}
 
-    vol_ratio  = float(last["Volume"]) / vol_avg
-    is_up_bar  = float(last["Close"]) > float(last["Open"])
+    vol_ratio   = float(last["Volume"]) / vol_avg
+    is_up_bar   = float(last["Close"]) > float(last["Open"])
+    is_down_bar = float(last["Close"]) < float(last["Open"])
 
-    if vol_ratio < SPIKE_VOL_MULT or not is_up_bar:
-        return {"signal": False, "score": 0,
-                "detail": f"vol {vol_ratio:.1f}x (need {SPIKE_VOL_MULT}x) / up={is_up_bar}"}
+    if vol_ratio < SPIKE_VOL_MULT:
+        return {"signal": False, "score": 0, "direction": "none",
+                "detail": f"vol {vol_ratio:.1f}x (need {SPIKE_VOL_MULT}x)"}
 
+    # Volume tier (shared by both directions)
     score = 25
     if vol_ratio >= 5.0:
         score += 25
@@ -347,24 +451,34 @@ def detect_volume_spike(df: pd.DataFrame) -> dict:
     elif vol_ratio >= 3.0:
         score += 10
 
-    return {
-        "signal": True,
-        "score":  min(score, 60),
-        "detail": f"Volume spike {vol_ratio:.1f}x avg on up-bar",
-    }
+    if is_up_bar:
+        return {"signal": True, "score": min(score, 60), "direction": "bullish",
+                "detail": f"Volume spike {vol_ratio:.1f}x avg on up-bar"}
+
+    if ENABLE_BIDIRECTIONAL_SIGNALS and is_down_bar:
+        return {"signal": True, "score": min(score, 60), "direction": "bearish",
+                "detail": f"Distribution spike {vol_ratio:.1f}x avg on down-bar"}
+
+    return {"signal": False, "score": 0, "direction": "none",
+            "detail": f"vol {vol_ratio:.1f}x on a doji/indecisive bar"}
 
 
 def detect_momentum_burst(df: pd.DataFrame) -> dict:
     """
-    Short-term momentum: 5-bar ROC + RSI rising and in healthy zone.
+    Short-term momentum: 5-bar ROC + fast RSI(9).
+      bullish — ROC > 0 and RSI rising in the 50–80 zone.
+      bearish (bidirectional mode) — ROC < 0 and RSI falling in the 20–50 zone.
 
-    Returns: {"signal": bool, "score": int, "detail": str}
+    Uses RSI_FAST_WINDOW (9) instead of the classic 14 so the indicator
+    reacts quickly enough to be useful on a scalp timeframe.
+
+    Returns: {"signal": bool, "score": int, "detail": str, "direction": str}
     """
-    if len(df) < 20:
-        return {"signal": False, "score": 0, "detail": "insufficient bars"}
+    if len(df) < RSI_FAST_WINDOW + 5:
+        return {"signal": False, "score": 0, "detail": "insufficient bars", "direction": "none"}
 
     close = df["Close"].astype(float)
-    rsi   = compute_rsi(close, window=14)
+    rsi   = compute_rsi(close, window=RSI_FAST_WINDOW)
 
     rsi_now  = float(rsi.iloc[-1])
     rsi_prev = float(rsi.iloc[-5])
@@ -372,88 +486,322 @@ def detect_momentum_burst(df: pd.DataFrame) -> dict:
     roc_5 = (float(close.iloc[-1]) - float(close.iloc[-6])) / float(close.iloc[-6]) * 100
 
     rsi_rising  = rsi_now > rsi_prev
-    rsi_healthy = 50 <= rsi_now <= 75
+    rsi_falling = rsi_now < rsi_prev
 
-    if not rsi_rising or roc_5 <= 0:
-        return {"signal": False, "score": 0,
-                "detail": f"ROC={roc_5:.2f}% RSI={rsi_now:.1f} rising={rsi_rising}"}
+    def _roc_score(magnitude: float) -> int:
+        if magnitude >= 2.0:
+            return 30
+        if magnitude >= 1.0:
+            return 20
+        if magnitude >= 0.5:
+            return 10
+        return 0
 
-    score = 0
-    if roc_5 >= 2.0:
-        score += 30
-    elif roc_5 >= 1.0:
-        score += 20
-    elif roc_5 >= 0.5:
-        score += 10
+    # Bullish: rising momentum. RSI ceiling 80 (was 75) — strong intraday trends
+    # often stay overbought; capping at 75 filtered out the best continuations.
+    if rsi_rising and roc_5 > 0:
+        score = _roc_score(roc_5)
+        score += 20 if (50 <= rsi_now <= 80) else 10
+        return {
+            "signal": score >= 20, "score": min(score, 50), "direction": "bullish",
+            "detail": f"ROC5={roc_5:.2f}% | RSI({RSI_FAST_WINDOW})={rsi_now:.1f} (↑)",
+        }
 
-    if rsi_rising and rsi_healthy:
-        score += 20
-    elif rsi_rising:
-        score += 10
+    # Bearish: falling momentum (mirror of the bullish zone, 20–50).
+    if ENABLE_BIDIRECTIONAL_SIGNALS and rsi_falling and roc_5 < 0:
+        score = _roc_score(abs(roc_5))
+        score += 20 if (20 <= rsi_now <= 50) else 10
+        return {
+            "signal": score >= 20, "score": min(score, 50), "direction": "bearish",
+            "detail": f"ROC5={roc_5:.2f}% | RSI({RSI_FAST_WINDOW})={rsi_now:.1f} (↓)",
+        }
+
+    return {"signal": False, "score": 0, "direction": "none",
+            "detail": f"ROC={roc_5:.2f}% RSI={rsi_now:.1f} rising={rsi_rising}"}
+
+
+def detect_range_breakout(df: pd.DataFrame, lookback: int = RANGE_LOOKBACK) -> dict:
+    """
+    Intraday range breakout: price breaks above the high (or below the low) of
+    the last `lookback` bars on a volume confirmation. Distinct from ORB — this
+    fires any time of day off a fresh consolidation, not just the opening range.
+
+    Returns: {"signal": bool, "score": int, "detail": str, "direction": str}
+    """
+    if len(df) < lookback + 2:
+        return {"signal": False, "score": 0, "detail": "insufficient bars", "direction": "none"}
+
+    prior      = df.iloc[-(lookback + 1):-1]       # the `lookback` bars before the current one
+    range_high = float(prior["High"].max())
+    range_low  = float(prior["Low"].min())
+    last_close = float(df["Close"].iloc[-1])
+    last_vol   = float(df["Volume"].iloc[-1])
+    vol_avg    = float(compute_rolling_vol_avg(df["Volume"]).iloc[-1])
+    vol_ok     = (vol_avg > 0) and (last_vol / vol_avg >= 1.5)
+
+    if last_close > range_high:
+        score = 30 + (25 if vol_ok else 0)
+        pct = round((last_close - range_high) / range_high * 100, 2)
+        return {"signal": True, "score": min(score, 70), "direction": "bullish",
+                "detail": f"Range breakout above ${range_high:.2f} (+{pct:.2f}%)"}
+    if last_close < range_low:
+        score = 30 + (20 if vol_ok else 0)
+        pct = round((range_low - last_close) / range_low * 100, 2)
+        return {"signal": True, "score": min(score, 60), "direction": "bearish",
+                "detail": f"Range breakdown below ${range_low:.2f} (-{pct:.2f}%)"}
+    return {"signal": False, "score": 0, "detail": "inside range", "direction": "none"}
+
+
+def detect_vwap_bounce(df: pd.DataFrame, vwap: pd.Series) -> dict:
+    """
+    VWAP pullback continuation (a trend entry, not a cross like VWAP reclaim):
+      bullish — price was above VWAP, dipped to test it as SUPPORT, holds and
+                turns back up.
+      bearish (bidirectional mode) — price was below VWAP, rallied to test it as
+                RESISTANCE, fails and turns back down.
+
+    Returns: {"signal": bool, "score": int, "detail": str, "direction": str}
+    """
+    if len(df) < 6:
+        return {"signal": False, "score": 0, "detail": "insufficient bars", "direction": "none"}
+
+    close      = df["Close"].astype(float)
+    last_close = float(close.iloc[-1])
+    last_vwap  = float(vwap.iloc[-1])
+    prev_close = float(close.iloc[-2])
+    if last_vwap <= 0:
+        return {"signal": False, "score": 0, "detail": "no vwap", "direction": "none"}
+
+    vol_avg  = float(compute_rolling_vol_avg(df["Volume"]).iloc[-1])
+    last_vol = float(df["Volume"].iloc[-1])
+    vol_ok   = (vol_avg > 0) and (last_vol / vol_avg >= 1.2)
+
+    # Bullish: was above, dipped to test support, turned back up holding above.
+    was_above   = float(close.iloc[-5]) > float(vwap.iloc[-5]) * 1.002
+    recent_low  = float(df["Low"].iloc[-4:-1].min())
+    held_support = (recent_low - last_vwap) / last_vwap <= 0.003 and recent_low >= last_vwap * 0.995
+    turned_up    = last_close > last_vwap and last_close > prev_close
+
+    if was_above and held_support and turned_up:
+        score = 35 + (15 if vol_ok else 0)
+        return {"signal": True, "score": min(score, 55), "direction": "bullish",
+                "detail": f"VWAP bounce — held ${last_vwap:.2f} support, turning up"}
+
+    # Bearish mirror: was below, rallied to test resistance, turned back down.
+    if ENABLE_BIDIRECTIONAL_SIGNALS:
+        was_below      = float(close.iloc[-5]) < float(vwap.iloc[-5]) * 0.998
+        recent_high    = float(df["High"].iloc[-4:-1].max())
+        held_resist    = (last_vwap - recent_high) / last_vwap <= 0.003 and recent_high <= last_vwap * 1.005
+        turned_down    = last_close < last_vwap and last_close < prev_close
+        if was_below and held_resist and turned_down:
+            score = 35 + (15 if vol_ok else 0)
+            return {"signal": True, "score": min(score, 55), "direction": "bearish",
+                    "detail": f"VWAP reject — failed ${last_vwap:.2f} resistance, turning down"}
+
+    return {"signal": False, "score": 0, "detail": "no VWAP bounce", "direction": "none"}
+
+
+def detect_strong_bar(df: pd.DataFrame) -> dict:
+    """
+    Price-action conviction: measures where the current bar closed within its
+    high–low range.  A close near the extreme shows that buyers/sellers were in
+    control for the whole bar — higher-quality signal than price crossing a line.
+
+    Bullish: close in the top 70%+ of the bar's range (strong demand).
+    Bearish: close in the bottom 30% or less (strong supply).
+    Volume must be >= 1.2× the rolling average to confirm conviction.
+
+    Returns: {"signal": bool, "score": int, "detail": str, "direction": str}
+    """
+    if len(df) < 5:
+        return {"signal": False, "score": 0, "detail": "insufficient bars", "direction": "none"}
+
+    last      = df.iloc[-1]
+    high      = float(last["High"])
+    low       = float(last["Low"])
+    close     = float(last["Close"])
+    bar_range = high - low
+
+    if bar_range <= 0:
+        return {"signal": False, "score": 0, "detail": "zero-range bar", "direction": "none"}
+
+    bar_quality = (close - low) / bar_range
+
+    vol_avg  = float(compute_rolling_vol_avg(df["Volume"]).iloc[-1])
+    last_vol = float(last["Volume"])
+    vol_ok   = (vol_avg > 0) and (last_vol / vol_avg >= 1.2)
+
+    if bar_quality >= 0.70:
+        score = 25
+        if bar_quality >= 0.85:
+            score += 10     # extra-strong close
+        if vol_ok:
+            score += 15     # volume-confirmed conviction
+        return {
+            "signal":    True,
+            "score":     min(score, 50),
+            "direction": "bullish",
+            "detail":    (f"Strong bull bar: close {bar_quality:.0%} of range"
+                          + (" +vol" if vol_ok else "")),
+        }
+
+    if bar_quality <= 0.30:
+        score = 25
+        if bar_quality <= 0.15:
+            score += 10
+        if vol_ok:
+            score += 15
+        return {
+            "signal":    True,
+            "score":     min(score, 50),
+            "direction": "bearish",
+            "detail":    (f"Strong bear bar: close {bar_quality:.0%} of range"
+                          + (" +vol" if vol_ok else "")),
+        }
 
     return {
-        "signal": score >= 20,
-        "score":  min(score, 50),
-        "detail": f"ROC5={roc_5:.2f}% | RSI={rsi_now:.1f} ({'↑' if rsi_rising else '↓'})",
+        "signal":    False,
+        "score":     0,
+        "detail":    f"Indecisive bar: close {bar_quality:.0%} of range",
+        "direction": "none",
     }
 
 
 # ─── Composite Scoring ─────────────────────────────────────────────────────────
 
+def _aligned_score(sig: dict, direction: str) -> int:
+    """
+    The score a signal contributes to a setup of the given direction.
+
+    In bidirectional mode a directional signal only counts when its own
+    direction agrees with the setup (or it is directionless) — a bearish signal
+    never pads a bullish setup and vice-versa. In long-only (legacy) mode every
+    signal's score counts regardless of direction, exactly as before.
+    """
+    score = sig.get("score", 0)
+    if not ENABLE_BIDIRECTIONAL_SIGNALS:
+        return score
+    return score if sig.get("direction", "none") in (direction, "none") else 0
+
+
+def resolve_direction(signals: dict) -> str:
+    """
+    Decide a setup's trade direction from its signals.
+
+    Long-only (legacy) mode: ORB direction wins, then range breakout, else
+    default bullish — exactly the original behavior.
+
+    Bidirectional mode: a score-weighted vote across every directional signal;
+    the heavier side wins, ties default bullish (preserves the prior long bias
+    only as a tiebreaker).
+    """
+    if not ENABLE_BIDIRECTIONAL_SIGNALS:
+        orb_dir   = signals.get("orb", {}).get("direction", "none")
+        range_dir = signals.get("range", {}).get("direction", "none")
+        if orb_dir in ("bullish", "bearish"):
+            return orb_dir
+        if range_dir in ("bullish", "bearish"):
+            return range_dir
+        return "bullish"
+
+    bull = bear = 0.0
+    for name, s in signals.items():
+        if name == "trend" or not isinstance(s, dict):
+            continue
+        d = s.get("direction", "none")
+        if d == "bullish":
+            bull += s.get("score", 0)
+        elif d == "bearish":
+            bear += s.get("score", 0)
+    return "bearish" if bear > bull else "bullish"
+
+
+def hft_conviction(signals: dict, direction: str = "bullish") -> str:
+    """
+    'high'  = the backtest-proven trio (VWAP reclaim + ORB + volume spike) all
+              fired — full-size, highest-edge setups.
+    'relaxed' = qualified on the looser confluence (e.g. range breakout + bounce)
+              but NOT the proven trio — the executor sizes these down.
+
+    In bidirectional mode the trio must fire in the SAME direction as the setup
+    (a bearish VWAP rejection + ORB breakdown + distribution spike is an equally
+    valid "high" short). In long-only mode direction is ignored, as before.
+    """
+    proven_triple = (_aligned_score(signals.get("vwap", {}),  direction) > 0
+                     and _aligned_score(signals.get("orb", {}),   direction) > 0
+                     and _aligned_score(signals.get("spike", {}), direction) > 0)
+    return "high" if proven_triple else "relaxed"
+
+
 def score_hft_setup(signals: dict, direction: str = "bullish") -> int:
     """
     Combine individual signal scores into a composite setup score (0–100).
-    Weights: ORB breakout > VWAP reclaim > vol spike > momentum burst.
+    Weights: ORB > VWAP reclaim > vol spike > range/bounce > strong bar > momentum.
 
     Applies a trend-alignment bonus/penalty based on EMA direction:
       +15 pts  if trade aligns with the EMA trend
       -15 pts  if trade is counter-trend (strong fade filter)
+
+    Every directional signal is counted via `_aligned_score`, so in
+    bidirectional mode a signal only contributes when it agrees with the setup
+    direction. `strong_bar` and `momentum` stay OUT of the confluence floor —
+    they are scoring tiebreakers only.
     """
-    orb_score      = signals.get("orb", {}).get("score", 0)
-    vwap_score     = signals.get("vwap", {}).get("score", 0)
-    spike_score    = signals.get("spike", {}).get("score", 0)
-    momentum_score = signals.get("momentum", {}).get("score", 0)
-    trend          = signals.get("trend", {})
+    orb_score    = _aligned_score(signals.get("orb",    {}), direction)
+    vwap_score   = _aligned_score(signals.get("vwap",   {}), direction)
+    spike_score  = _aligned_score(signals.get("spike",  {}), direction)
+    range_score  = _aligned_score(signals.get("range",  {}), direction)
+    bounce_score = _aligned_score(signals.get("bounce", {}), direction)
 
-    # Confluence count — only the three CORE signals (VWAP + ORB + Spike).
-    # Momentum is intentionally excluded: the 503-ticker × 60-day backtest
-    # showed it acts as a noise amplifier rather than a confirmation signal.
-    # Counting it here would double-pay setups (once via weight, once via
-    # confluence multiplier) and inflate weak FOMO chases.
-    active = sum(1 for s in [orb_score, vwap_score, spike_score] if s > 0)
-
-    # Weighted composite — momentum demoted to a tiebreaker.
-    #
-    # 503-ticker / 60-day backtest results, per-combo per-trade P&L:
-    #   [vwap, orb, spike]            n=21   avg +$70.96   total +$1,490
-    #   [vwap, orb, spike, momentum]  n=53   avg +$7.44    total +$394
-    #
-    # Same triple gate, ~10x worse outcome when momentum also fires.
-    # Conclusion: momentum lets in lower-quality FOMO-chase setups.
-    # Old weights:  orb 0.30 | vwap 0.20 | spike 0.30 | momentum 0.20
-    # New weights:  orb 0.35 | vwap 0.30 | spike 0.30 | momentum 0.05
-    raw = (
-        orb_score      * 0.35 +
-        vwap_score     * 0.30 +
-        spike_score    * 0.30 +
-        momentum_score * 0.05
+    # strong_bar only adds to the score when the bar's direction aligns with
+    # the setup direction — a bearish bar never boosts a bullish setup. (This
+    # alignment is enforced in BOTH modes.)
+    sb_data          = signals.get("strong_bar", {})
+    strong_bar_score = (
+        sb_data.get("score", 0)
+        if sb_data.get("direction", "none") in (direction, "none")
+        else 0
     )
 
-    # Hard gates: VWAP reclaim + ORB breakout + volume spike must ALL fire.
-    # 60-day backtesting confirmed per-combo P&L:
-    #   vwap+orb+spike          →  +$262/trade (4 trades)
-    #   vwap+orb+spike+momentum →  +$74/trade  (8 trades)
-    #   vwap+spike (no ORB)     →  -$44/trade  (7 trades) ← eliminated
-    #   orb+spike  (no VWAP)    →  -$3.54/trade (166 trades) ← eliminated
-    # All three signals together = confirmed momentum with institutional flow.
-    if spike_score == 0 or vwap_score == 0 or orb_score == 0:
+    momentum_score = _aligned_score(signals.get("momentum", {}), direction)
+    trend          = signals.get("trend", {})
+
+    # Core directional signals. Momentum and strong_bar are intentionally
+    # EXCLUDED from the confluence count: momentum was a noise amplifier in the
+    # 60-day 503-ticker backtest; strong_bar is unvalidated at the composite
+    # level.  Both act as scoring tiebreakers only.
+    core   = [vwap_score, orb_score, spike_score, range_score, bounce_score]
+    active = sum(1 for s in core if s > 0)
+
+    # Configurable confluence floor (was a hard 3-of-3 on vwap/orb/spike).
+    #   60-day backtest, per-combo per-trade P&L (the original trio study):
+    #     vwap+orb+spike          →  +$262/trade  ← the proven, high-conviction combo
+    #     vwap+spike (no ORB)     →  -$44/trade
+    #     orb+spike  (no VWAP)    →  -$3.54/trade
+    #   `range`, `bounce`, and `strong_bar` are NOT in that study — re-run
+    #   backtest_hft.py to validate before trusting relaxed-conviction setups.
+    if active < HFT_MIN_CONFLUENCE:
         return 0
 
+    # Weighted composite.  The proven trio keeps the heaviest weights;
+    # newer signals contribute less until backtested.
+    raw = (
+        orb_score        * 0.27 +
+        vwap_score       * 0.23 +
+        spike_score      * 0.22 +
+        range_score      * 0.13 +
+        bounce_score     * 0.10 +
+        strong_bar_score * 0.08 +
+        momentum_score   * 0.05
+    )
+
     # Confluence bonus
-    if active >= 3:
-        raw *= 1.25
+    if active >= 4:
+        raw *= 1.30
+    elif active >= 3:
+        raw *= 1.20
     elif active >= 2:
-        raw *= 1.10
+        raw *= 1.08
 
     # Trend alignment modifier
     if trend:
@@ -499,26 +847,28 @@ def scan_ticker(
 
     vwap = compute_vwap(df)
 
-    # Determine dominant direction before scoring (needed for trend modifier)
-    orb_result = detect_orb_breakout(df)
-    vwap_result = detect_vwap_reclaim(df, vwap)
-    orb_dir    = orb_result.get("direction", "none")
-    vwap_sig   = vwap_result.get("signal", False)
-    direction  = orb_dir if orb_dir in ("bullish", "bearish") else (
-        "bullish" if vwap_sig else "bullish"
-    )
-
+    # Compute every signal, then resolve direction from them. In long-only mode
+    # resolve_direction reduces to "ORB, then range, else bullish" (legacy); in
+    # bidirectional mode it is a score-weighted vote across all directional
+    # signals, so a cluster of bearish signals drives a short setup.
     signals = {
-        "vwap":     vwap_result,
-        "orb":      orb_result,
-        "spike":    detect_volume_spike(df),
-        "momentum": detect_momentum_burst(df),
-        "trend":    detect_trend_alignment(df),   # Gate 3: EMA filter
+        "vwap":       detect_vwap_reclaim(df, vwap),
+        "orb":        detect_orb_breakout(df),
+        "spike":      detect_volume_spike(df),
+        "range":      detect_range_breakout(df),
+        "bounce":     detect_vwap_bounce(df, vwap),
+        "momentum":   detect_momentum_burst(df),
+        "strong_bar": detect_strong_bar(df),
+        "trend":      detect_trend_alignment(df),   # Gate: EMA filter
     }
+
+    direction = resolve_direction(signals)
 
     score = score_hft_setup(signals, direction=direction)
     if score < MIN_SIGNAL_SCORE:
         return None
+
+    conviction = hft_conviction(signals, direction)
 
     last      = df.iloc[-1]
     last_vwap = float(vwap.iloc[-1])
@@ -531,6 +881,11 @@ def scan_ticker(
     return {
         "ticker":         ticker,
         "setup_score":    score,
+        "trade_style":    "day",     # intraday scalp — flat by EOD
+        "day_trade_ok":   True,
+        "style_reason":   (f"day: {conviction} conviction {direction} intraday momentum "
+                           f"({', '.join(active_signals) or 'confluence'})"),
+        "conviction":     conviction,
         "direction":      direction,
         "last_price":     round(float(last["Close"]), 2),
         "vwap":           round(last_vwap, 2),
@@ -553,6 +908,7 @@ def run_hft_scan(
     universe_limit: int = UNIVERSE_LIMIT,
     interval: str = DEFAULT_INTERVAL,
     min_score: int = MIN_SIGNAL_SCORE,
+    rotation_key: str | None = None,
 ) -> list[dict]:
     """
     Full intraday scan pipeline.
@@ -564,7 +920,7 @@ def run_hft_scan(
     print(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  |  interval={interval}")
     print("=" * 60 + "\n")
 
-    symbols = load_universe(csv_path=csv_path, limit=universe_limit)
+    symbols = load_universe(csv_path=csv_path, limit=universe_limit, rotation_key=rotation_key)
     liquid  = filter_universe(
         symbols=symbols,
         min_price=MIN_PRICE,

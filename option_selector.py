@@ -16,8 +16,9 @@ Bot logic:
   is too high, then step out to ~0.35 delta
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from tradier_client import get_options_expirations, get_options_chain, get_quote
+from utils import today_est
 
 
 # ─── Config ────────────────────────────────────────────────────────────────────
@@ -42,7 +43,11 @@ def parse_expiry(date_str: str) -> datetime:
 
 
 def days_to_expiry(date_str: str) -> int:
-    return (parse_expiry(date_str) - datetime.now()).days
+    # Date-only comparison so DTE doesn't shrink mid-session: datetime.now()
+    # would make a tomorrow-expiry show 0 DTE at 11 PM, incorrectly failing the
+    # MIN_DTE >= 5 guard. Anchored to US/Eastern so the rollover happens with
+    # the market, not the host's local midnight.
+    return (datetime.strptime(date_str, "%Y-%m-%d").date() - today_est()).days
 
 
 def spread_quality(bid: float, ask: float) -> float:

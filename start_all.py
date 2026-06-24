@@ -9,6 +9,9 @@ What it starts:
     2. executor.py            — Strategy 1 (swing options, 7–30 DTE)
     3. iv_rank_bot.py         — Strategy 2 (IV-rank premium plays)
     4. hft_executor.py        — Strategy 3 (intraday 0-DTE momentum)
+    5. pead_executor.py       — Strategy 4 (post-earnings / news-drift swing)
+    6. bounce_executor.py     — Strategy 5 (bear-regime capitulation bounce)
+    7. news_feed.py --monitor — fast categorized headline feed (News tab)
 
 Each bot has its own internal market-hours guard, so it's safe to start them
 24/7 — they'll idle outside market hours and resume automatically at the
@@ -26,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import os
 import signal
 import subprocess
 import sys
@@ -60,6 +62,24 @@ COMPONENTS: dict[str, dict] = {
         "args":    [],
         "label":   "Strategy 3 — Intraday HFT executor",
         "needs_broker": True,
+    },
+    "pead_executor": {
+        "script":  "pead_executor.py",
+        "args":    [],
+        "label":   "Strategy 4 — Post-earnings / news-drift executor",
+        "needs_broker": True,
+    },
+    "bounce_executor": {
+        "script":  "bounce_executor.py",
+        "args":    [],
+        "label":   "Strategy 5 — Capitulation-bounce executor (bear-regime offense)",
+        "needs_broker": True,
+    },
+    "news_monitor": {
+        "script":  "news_feed.py",
+        "args":    ["--monitor"],
+        "label":   "News monitor — fast categorized headline feed",
+        "needs_broker": False,   # works via yfinance even without Tradier creds
     },
 }
 
@@ -125,6 +145,21 @@ def _spawn(name: str, comp: dict, logs_dir: Path) -> subprocess.Popen:
     proc._mawitek_log_fp = log_fp  # type: ignore[attr-defined]
     proc._mawitek_log_path = log_path  # type: ignore[attr-defined]
     return proc
+
+
+def _alert_strategy_down(name: str, detail: str) -> None:
+    """Push a notification that a strategy died or stalled. Best-effort."""
+    try:
+        from event_notifier import _dispatch
+        _dispatch(
+            subject=f"Strategy DOWN — {name}",
+            lines=[f"{name} is no longer running normally.",
+                   f"Detail: {detail}",
+                   "Open positions are NOT being managed by this strategy until it restarts."],
+            severity="danger",
+        )
+    except Exception as e:
+        print(f"[start_all] could not send down-alert for {name}: {e}")
 
 
 def _stop(proc: subprocess.Popen, name: str, timeout: float = 5.0) -> None:
@@ -195,6 +230,15 @@ def main() -> int:
 
     procs: dict[str, subprocess.Popen] = {}
 
+    # Clear any stale heartbeat files from a previous run so the watchdog
+    # doesn't false-alarm on beats left over from before this launch.
+    try:
+        from heartbeat import clear as _hb_clear
+        for name in selected:
+            _hb_clear(name)
+    except Exception:
+        pass
+
     try:
         for name in selected:
             comp = COMPONENTS[name]
@@ -219,7 +263,23 @@ def main() -> int:
         print(f"  Press Ctrl+C to stop everything.")
         print("-" * 70)
 
-        # Babysit: poll every second, restart-aware reporting on crashes.
+        # Watchdog config: a strategy that hasn't beaten its heartbeat in this
+        # many seconds is considered stalled (alive but stuck). The threshold
+        # is generous because the swing executor only beats once per ~5-min
+        # cycle; HFT beats every 60s. Grace period avoids alarming during the
+        # initial startup before the first beat lands.
+        HEARTBEAT_STALE_SECONDS = 600
+        HEARTBEAT_GRACE_SECONDS = 150
+        HEARTBEAT_CHECK_EVERY   = 30
+        # Only watch components that actually beat (not the dashboard server).
+        watched = {n for n in procs if n in ("executor", "iv_rank_bot", "hft_executor",
+                                             "pead_executor", "bounce_executor", "news_monitor")}
+        stalled_alerted: set[str] = set()
+        launch_time = time.time()
+        last_hb_check = 0.0
+
+        # Babysit: poll every second, restart-aware reporting on crashes,
+        # plus a periodic heartbeat-staleness check for hung-but-alive procs.
         while True:
             time.sleep(1.0)
             for name, proc in list(procs.items()):
@@ -236,7 +296,30 @@ def main() -> int:
                             print(f"    | {ln}")
                     print(f"[start_all] {name} will NOT auto-restart. "
                           f"Fix the issue, then re-run start_all.py.")
+                    _alert_strategy_down(name, f"process exited with code {rc}")
                     del procs[name]
+                    watched.discard(name)
+
+            # Heartbeat staleness check (hung-but-alive detection)
+            nowt = time.time()
+            if (watched
+                    and nowt - launch_time > HEARTBEAT_GRACE_SECONDS
+                    and nowt - last_hb_check > HEARTBEAT_CHECK_EVERY):
+                last_hb_check = nowt
+                try:
+                    from heartbeat import stale_heartbeats
+                    stale = {s for s, _age, _rec in stale_heartbeats(HEARTBEAT_STALE_SECONDS)}
+                except Exception:
+                    stale = set()
+                for name in watched:
+                    if name in stale and name not in stalled_alerted:
+                        print(f"\n[start_all] WARNING: {name} is ALIVE but STALLED "
+                              f"(no heartbeat in >{HEARTBEAT_STALE_SECONDS}s). It may be hung.")
+                        _alert_strategy_down(name, f"stalled — no heartbeat in >{HEARTBEAT_STALE_SECONDS}s")
+                        stalled_alerted.add(name)
+                    elif name not in stale and name in stalled_alerted:
+                        print(f"[start_all] {name} heartbeat recovered.")
+                        stalled_alerted.discard(name)
 
             if not procs:
                 print("\n[start_all] All components have exited. Quitting.")

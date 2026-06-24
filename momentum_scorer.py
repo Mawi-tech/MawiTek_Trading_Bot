@@ -11,29 +11,17 @@ Combines:
 - RSI trend (rising RSI in healthy range)
 """
 
-import yfinance as yf
 import pandas as pd
 import ta
 
-
-def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-    return df
+from market_data import get_daily_bars
 
 
 def get_daily_data(ticker: str, period: str = "1y") -> pd.DataFrame:
-    df = yf.download(
-        tickers=ticker,
-        interval="1d",
-        period=period,
-        auto_adjust=False,
-        progress=False,
-        threads=False
-    )
-    df = flatten_columns(df)
-    df.dropna(inplace=True)
-    return df
+    # period "1y" ≈ 365 days, "3mo" ≈ 90 days — convert to calendar days
+    days_map = {"1y": 365, "2y": 730, "6mo": 180, "3mo": 90, "1mo": 30}
+    days = days_map.get(period, 365)
+    return get_daily_bars(ticker, days=days)
 
 
 def score_momentum(ticker: str) -> dict:
