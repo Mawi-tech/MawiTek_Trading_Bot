@@ -4,8 +4,8 @@ hft_executor.py  —  Strategy 3: Intraday Execution Engine
 Fast-cycling execution loop for the HFT intraday scanner.
 Scans every 60 seconds (configurable), enters on qualifying setups,
 and exits on any of:
-    - Take profit: +30% on option premium
-    - Stop loss:   -25% on option premium
+    - Take profit: +100% on option premium (let convex winners run)
+    - Stop loss:   -20% on option premium (cut losers fast)
     - Time stop:   position held > MAX_HOLD_MINUTES
     - EOD flatten: all positions closed 15 minutes before market close
 
@@ -17,34 +17,79 @@ Run:
 
 import time
 import datetime
-import json
-import os
 
 from hft_scanner import run_hft_scan
+from universe import scan_csv
+import exit_manager
+import position_book as _pb
 from tradier_client import (
     get_options_expirations, get_options_chain, get_quote,
-    place_option_order, get_open_positions, MOCK_MODE,
+    get_open_positions, MOCK_MODE,
 )
-from risk_manager import pre_trade_check, calculate_contracts, record_trade
+from order_manager import place_and_confirm, recover_pending_orders
+from risk_manager import pre_trade_check, size_contracts, record_trade, reconcile_from_broker
+from logger import get_logger, log_trade
+from trade_journal import record_closed_trade
+from decision_log import log_decision, ACTION_TRADED, ACTION_REJECTED, ACTION_EXITED
+from heartbeat import beat
+from utils import now_est, today_est, parse_isodt, spread_pct as _spread_pct, is_market_open
+
+log = get_logger("hft_executor")
 
 
 # ─── Execution Config ──────────────────────────────────────────────────────────
 
 SCAN_INTERVAL_SEC   = 60        # Re-scan every 60 seconds
 SCAN_INTERVAL       = "5m"      # Bar interval for scanner
-MIN_SETUP_SCORE     = 55        # Higher bar than overnight catalyst bot
-MAX_TRADES_PER_SCAN = 2         # Max new intraday positions per scan
-MAX_HOLD_MINUTES    = 45        # Time-stop: close after this many minutes
-TAKE_PROFIT_PCT     = 0.30      # Exit at +30% on option premium
-STOP_LOSS_PCT       = 0.25      # Exit at -25% on option premium
+MIN_SETUP_SCORE     = 45        # Score floor (50→45 Jun 2026 trade-frequency push)
+MAX_TRADES_PER_SCAN = 4         # Max new intraday positions per scan (was 2)
+SCAN_UNIVERSE_LIMIT = 250       # Names per scan cycle (rotates through the full market)
+                                # (was a stale hardcoded 75 that quietly shrank coverage)
 
-# DTE selection: 0-DTE first, fall back to 1-DTE
+# Exit rules — ASYMMETRIC by design (validated Jun 2026, see backtest_hft.py).
+# Long options are convex: the strategy's signals are only ~36% directional, so
+# a symmetric 30/25 TP/SL was a coin-flip that bled to costs (PF ~1.0, slightly
+# negative). Cutting losers fast (-20%) and letting winners run (+100% or the
+# time stop) gives a ~5:1 reward:risk that flips it to PF ~1.6 across two
+# independent samples. Win rate FALLS (~45%→36%) but expectancy turns positive.
+MAX_HOLD_MINUTES    = 60        # Time-stop: let winners develop (was 45)
+TAKE_PROFIT_PCT     = 1.00      # Let winners run to +100% (was 0.30)
+STOP_LOSS_PCT       = 0.20      # Cut losers fast at -20% (was 0.25)
+
+# Position size as a fraction of equity, by conviction. "high" = the
+# backtest-proven VWAP+ORB+spike trio (full intraday size); "relaxed" = a
+# looser-confluence setup (sized DOWN, since its edge is unvalidated).
+HFT_SIZE_PCT_HIGH    = 0.010    # 1.0% of equity
+HFT_SIZE_PCT_RELAXED = 0.005    # 0.5% of equity
+
+# DTE selection: 0-DTE first, fall back to 1-DTE, then widen out to
+# MAX_FALLBACK_DTE for names without weekly options (e.g. PSX has only
+# monthlies — on most days it has NO 0-2 DTE chain at all, which used to
+# silently kill every setup on such names at contract selection).
+# A 3-5 DTE option still scalps fine intraday: less gamma but also less
+# theta bleed, and the 60-min time stop / EOD flatten keep it a day trade.
 PREFERRED_DTE_MAX   = 1
 PREFERRED_DTE_MIN   = 0
+MAX_FALLBACK_DTE    = 5
 
 # Order settings
 USE_LIMIT           = True
-LIMIT_BUFFER        = 0.05      # Pay up to 5% above mid
+LIMIT_BUFFER        = 0.05      # Cushion ABOVE the ask for a marketable entry limit
+
+
+def _marketable_limit(ask: float, mid: float, buffer: float = LIMIT_BUFFER) -> float:
+    """
+    Buy-entry limit that actually FILLS on a fast 0-DTE mover.
+
+    The old code priced at mid×(1+buffer). But the HFT selector allows spreads up
+    to 30%, and for any spread wider than ~2×buffer that price sits BELOW the ask,
+    so the limit rests unfilled and gets canceled (the day-trade "no fill" bug).
+    Pricing off the ASK makes the limit marketable — it crosses the spread and
+    fills at the ask (or better), with `buffer` as a small cushion so a tick-up
+    between placement and execution still fills. It's a CAP, not the fill price.
+    """
+    base = ask if ask and ask > 0 else mid
+    return round(base * (1 + buffer), 2)
 
 # Market hours (EST)
 MARKET_OPEN_H       = 9
@@ -60,39 +105,105 @@ HFT_STATE_FILE      = "hft_positions.json"
 
 # ─── Position State ────────────────────────────────────────────────────────────
 
+# Single-leg book logic is shared across the 3 day/swing executors
+# (see position_book.py); these wrappers bind it to this strategy's own file.
 def _load_positions() -> list[dict]:
-    if not os.path.exists(HFT_STATE_FILE):
-        return []
+    return _pb.load(HFT_STATE_FILE)
+
+
+def _save_positions(positions: list[dict]) -> None:
+    _pb.save(HFT_STATE_FILE, positions)
+
+
+def _add_position(position: dict) -> None:
+    _pb.add(HFT_STATE_FILE, position)
+
+
+def _remove_position(option_symbol: str) -> None:
+    _pb.remove(HFT_STATE_FILE, option_symbol)
+
+
+def _update_position(option_symbol: str, **fields) -> None:
+    _pb.update(HFT_STATE_FILE, option_symbol, **fields)
+
+
+def reconcile_hft_positions() -> int:
+    """
+    Verify each locally-tracked HFT position is still open at the broker.
+
+    The HFT strategy keeps its own position file (hft_positions.json) that the
+    main risk_manager reconciliation never touches. Without this, a position
+    closed outside the bot (manual close, expiry, broker auto-liquidation)
+    would linger in the local file forever — the bot would keep "monitoring"
+    a position it no longer owns and could never re-enter the underlying.
+
+    Any local position missing from the broker is journaled as
+    closed_externally and dropped from the local file.
+
+    Returns the count of stale positions reconciled.
+    """
+    local = _load_positions()
+    if not local:
+        return 0
+
     try:
-        with open(HFT_STATE_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return []
+        broker_pos  = get_open_positions()
+        broker_syms = {p.get("symbol") for p in broker_pos if p.get("symbol")}
+    except Exception as e:
+        log.warning("reconcile_hft_positions: could not query broker: %s", e)
+        return 0
 
+    # In MOCK_MODE the broker returns [] — don't nuke local state in that case.
+    if MOCK_MODE:
+        return 0
 
-def _save_positions(positions: list[dict]):
-    with open(HFT_STATE_FILE, "w") as f:
-        json.dump(positions, f, indent=2, default=str)
+    stale = [p for p in local if p.get("option_symbol") not in broker_syms]
+    for pos in stale:
+        sym = pos.get("option_symbol", "")
+        log.info("Stale HFT position %s not at broker — journaling as closed_externally", sym)
 
+        entry_price = float(pos.get("entry_price", 0) or 0)
+        # Best-effort exit mark from the chain; fall back to entry (0 P&L).
+        exit_price = entry_price
+        try:
+            chain = get_options_chain(pos.get("underlying", ""), pos.get("expiration", ""))
+            for c in chain:
+                if c.get("symbol") == sym:
+                    bid = float(c.get("bid", 0) or 0)
+                    ask = float(c.get("ask", 0) or 0)
+                    if bid > 0 and ask > 0:
+                        exit_price = round((bid + ask) / 2, 2)
+                    break
+        except Exception:
+            pass
 
-def _add_position(position: dict):
-    positions = _load_positions()
-    positions.append(position)
-    _save_positions(positions)
+        try:
+            record_closed_trade(
+                option_symbol = sym,
+                underlying    = pos.get("underlying", ""),
+                entry_price   = entry_price,
+                exit_price    = exit_price,
+                quantity      = int(pos.get("quantity", 0) or 0),
+                expiration    = pos.get("expiration", ""),
+                entry_time    = pos.get("entry_time"),
+                exit_reason   = "closed_externally",
+                setup_score   = pos.get("setup_score"),
+                signals       = {
+                    "direction":   pos.get("direction"),
+                    "option_type": pos.get("option_type"),
+                    "strike":      pos.get("strike"),
+                    "dte":         pos.get("dte"),
+                },
+                strategy      = "hft_intraday",
+            )
+        except Exception as e:
+            log.error("Failed to journal stale HFT position %s: %s", sym, e)
+        _remove_position(sym)
 
-
-def _remove_position(option_symbol: str):
-    positions = _load_positions()
-    positions = [p for p in positions if p.get("option_symbol") != option_symbol]
-    _save_positions(positions)
+    return len(stale)
 
 
 # ─── Option Selection (0–1 DTE) ────────────────────────────────────────────────
-
-def _spread_pct(bid: float, ask: float) -> float:
-    mid = (bid + ask) / 2
-    return (ask - bid) / mid if mid > 0 else 1.0
-
 
 def select_intraday_option(
     ticker: str,
@@ -100,7 +211,8 @@ def select_intraday_option(
     budget: float,
 ) -> dict | None:
     """
-    Pick the best 0-DTE or 1-DTE contract matching the signal direction.
+    Pick the best contract matching the signal direction: 0-1 DTE preferred,
+    widening to MAX_FALLBACK_DTE for names that only carry monthly options.
 
     direction: "bullish" → call, "bearish" → put.
     Returns best contract dict with _mid_price injected, or None.
@@ -113,7 +225,7 @@ def select_intraday_option(
     if stock_price <= 0:
         return None
 
-    today = datetime.date.today()
+    today = today_est()    # ET — the date the broker thinks it is for expiry math
     valid_exps = []
     for exp in exps:
         exp_date = datetime.date.fromisoformat(exp)
@@ -122,15 +234,16 @@ def select_intraday_option(
             valid_exps.append((dte, exp))
 
     if not valid_exps:
-        # Widen to 2 DTE
+        # No 0-1 DTE chain (name without weeklies) — widen out to the nearest
+        # expiry within MAX_FALLBACK_DTE so the setup isn't silently dropped.
         for exp in exps:
             exp_date = datetime.date.fromisoformat(exp)
             dte = (exp_date - today).days
-            if dte == 2:
+            if PREFERRED_DTE_MAX < dte <= MAX_FALLBACK_DTE:
                 valid_exps.append((dte, exp))
 
     if not valid_exps:
-        print(f"[HFT Exec] No 0–2 DTE expirations for {ticker}")
+        log.warning("No 0-%d DTE expirations for %s", MAX_FALLBACK_DTE, ticker)
         return None
 
     # Prefer nearest DTE
@@ -147,7 +260,10 @@ def select_intraday_option(
             if c.get("option_type") == option_type
             and float(c.get("bid", 0) or 0) > 0
             and float(c.get("ask", 0) or 0) > 0
-            and int(c.get("open_interest", 0) or 0) >= 10
+            # 0-DTE OI is often stale/low at open (settlement day); accept any
+            # contract that has a live two-sided market (bid+ask already checked).
+            # For 1-2 DTE keep a minimal floor so we're not trading phantom contracts.
+            and (dte == 0 or int(c.get("open_interest", 0) or 0) >= 1)
         ]
         if not legs:
             continue
@@ -172,7 +288,7 @@ def select_intraday_option(
             contract["_option_type"] = option_type
             return contract
 
-    print(f"[HFT Exec] No qualifying {option_type} contract for {ticker}")
+    log.warning("No qualifying %s contract for %s", option_type, ticker)
     return None
 
 
@@ -181,27 +297,30 @@ def select_intraday_option(
 def monitor_hft_positions():
     """
     Check each tracked HFT position against exit rules:
-    - Take profit (+30%)
-    - Stop loss (-25%)
-    - Time stop (> MAX_HOLD_MINUTES)
+    - Take profit  (+TAKE_PROFIT_PCT, currently +100% — let convex winners run)
+    - Stop loss    (-STOP_LOSS_PCT,   currently  -20% — cut losers fast)
+    - Time stop    (held > MAX_HOLD_MINUTES, currently 60m)
     """
     positions = _load_positions()
     if not positions:
         return
 
-    now = datetime.datetime.now()
+    now = now_est()    # tz-aware so it subtracts cleanly from tz-aware entry_time
     to_close = []
+    to_scale = []      # (pos, qty) partial scale-outs
+    peaks_dirty = False
 
     for pos in positions:
         option_symbol = pos["option_symbol"]
         entry_price   = pos["entry_price"]
-        entry_time    = datetime.datetime.fromisoformat(pos["entry_time"])
+        # parse_isodt tolerates legacy naive entry_time records too.
+        entry_time    = parse_isodt(pos["entry_time"])
         quantity      = pos["quantity"]
 
         # Time stop
         hold_minutes = (now - entry_time).total_seconds() / 60
         if hold_minutes >= MAX_HOLD_MINUTES:
-            print(f"[HFT Exec] ⏱ Time stop hit for {option_symbol} ({hold_minutes:.0f}m held)")
+            log.info("Time stop hit for %s (%.0fm held)", option_symbol, hold_minutes)
             to_close.append((pos, "time_stop"))
             continue
 
@@ -231,47 +350,148 @@ def monitor_hft_positions():
 
         pct_change = (current_mid - entry_price) / entry_price
 
+        # Trailing stop + scale-out, layered on top of the fixed TP/SL.
+        peak = exit_manager.update_peak(pos, pct_change)
+        peaks_dirty = True
+
+        scale_qty = exit_manager.scale_out_quantity(pos, pct_change, exit_manager.HFT_EXIT)
+        if scale_qty > 0:
+            log.info("Scale-out %s | +%.0f%% — banking %d of %d contracts",
+                     option_symbol, pct_change * 100, scale_qty, quantity)
+            to_scale.append((pos, scale_qty))
+            continue
+
+        if exit_manager.trailing_stop_hit(pct_change, peak, exit_manager.HFT_EXIT):
+            log.info("Trailing stop %s | peak +%.0f%% -> now +%.0f%%",
+                     option_symbol, peak * 100, pct_change * 100)
+            to_close.append((pos, "trailing_stop"))
+            continue
+
         if pct_change >= TAKE_PROFIT_PCT:
-            print(
-                f"[HFT Exec] 🎯 TP hit {option_symbol} | "
-                f"Entry ${entry_price:.2f} → Now ${current_mid:.2f} "
-                f"(+{pct_change:.1%})"
-            )
+            log.info("TP hit %s | Entry $%.2f -> Now $%.2f (+%.1f%%)",
+                     option_symbol, entry_price, current_mid, pct_change * 100)
             to_close.append((pos, "take_profit"))
 
         elif pct_change <= -STOP_LOSS_PCT:
-            print(
-                f"[HFT Exec] 🛑 SL hit {option_symbol} | "
-                f"Entry ${entry_price:.2f} → Now ${current_mid:.2f} "
-                f"({pct_change:.1%})"
-            )
+            log.info("SL hit %s | Entry $%.2f -> Now $%.2f (%.1f%%)",
+                     option_symbol, entry_price, current_mid, pct_change * 100)
             to_close.append((pos, "stop_loss"))
 
+    # Persist the updated high-water marks before any close reloads the book.
+    if peaks_dirty:
+        _save_positions(positions)
+
+    for pos, qty in to_scale:
+        _close_position(pos, "scale_out", close_qty=qty)
     for pos, reason in to_close:
         _close_position(pos, reason)
 
 
-def _close_position(pos: dict, reason: str):
-    """Place a sell_to_close order for a tracked HFT position."""
+def _close_position(pos: dict, reason: str, close_qty: int | None = None):
+    """Sell-to-close a tracked HFT position — fully, or just `close_qty` contracts
+    for a partial scale-out (the remainder stays open as a house-money runner)."""
     option_symbol = pos["option_symbol"]
     underlying    = pos.get("underlying", pos["option_symbol"])
+    entry_price   = pos.get("entry_price", 0)
     quantity      = pos["quantity"]
+    qty_to_close  = quantity if close_qty is None else max(1, min(int(close_qty), quantity))
+    partial       = qty_to_close < quantity
 
-    print(f"[HFT Exec] Closing {option_symbol} x{quantity} — reason: {reason}")
+    log.info("Closing %s x%d%s — reason: %s", option_symbol, qty_to_close,
+             " (scale-out)" if partial else "", reason)
 
-    order = place_option_order(
+    fill = place_and_confirm(
         symbol=underlying,
         option_symbol=option_symbol,
         side="sell_to_close",
-        quantity=quantity,
+        quantity=qty_to_close,
         order_type="market",
+        strategy="hft_intraday",
+        fallback_price=entry_price,
+        timeout=20.0,
     )
 
-    if order.get("status") != "error":
-        _remove_position(option_symbol)
-        print(f"[HFT Exec] ✅ Closed {option_symbol}")
+    if fill.ok and fill.filled_qty > 0:
+        closed_qty = int(fill.filled_qty)
+        remaining  = quantity - closed_qty
+        if remaining > 0:
+            # Partial scale-out — keep the runner, mark it so we only scale once.
+            _update_position(option_symbol, quantity=remaining, scaled_out=True)
+        else:
+            _remove_position(option_symbol)
+        exit_price = float(fill.avg_fill_price) if fill.avg_fill_price > 0 else entry_price
+        pnl_pct    = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+        pnl_dollar = round((exit_price - entry_price) * closed_qty * 100, 2)
+        log.info("Closed %s x%d | Reason: %s | P&L: %+.1f%% ($%+.2f)%s",
+                 option_symbol, closed_qty, reason, pnl_pct, pnl_dollar,
+                 f" | {remaining} left running" if remaining > 0 else "")
+        log_trade({
+            "strategy":      "hft_intraday",
+            "ticker":        underlying,
+            "approved":      True,
+            "action":        "sell_to_close",
+            "option_symbol": option_symbol,
+            "exit_reason":   reason,
+            "entry_price":   entry_price,
+            "exit_price":    exit_price,
+            "quantity":      closed_qty,
+            "pnl_pct":       round(pnl_pct, 2),
+            "pnl_dollar":    pnl_dollar,
+        })
+        # Journal to closed_trades.json so the dashboard's Trade History /
+        # Analytics tabs can see HFT trades. Previously these only landed
+        # in the file log and never reached the journal.
+        try:
+            record_closed_trade(
+                option_symbol = option_symbol,
+                underlying    = underlying,
+                entry_price   = entry_price,
+                exit_price    = exit_price,
+                quantity      = closed_qty,
+                expiration    = pos.get("expiration", ""),
+                entry_time    = pos.get("entry_time"),
+                exit_reason   = reason,
+                setup_score   = pos.get("setup_score"),
+                signals       = {
+                    "direction":   pos.get("direction"),
+                    "option_type": pos.get("option_type"),
+                    "strike":      pos.get("strike"),
+                    "dte":         pos.get("dte"),
+                },
+                strategy      = "hft_intraday",
+            )
+        except Exception as e:
+            log.error("Failed to journal HFT close for %s: %s", option_symbol, e)
+
+        # Audit-log the exit (what fired and the outcome).
+        log_decision(
+            ticker=underlying, action=ACTION_EXITED, strategy="hft_intraday",
+            reason=reason,
+            extras={"option_symbol": option_symbol,
+                    "entry_price": entry_price, "exit_price": round(exit_price, 4),
+                    "pnl_pct": round(pnl_pct, 2), "pnl_dollar": pnl_dollar},
+            force=True,   # exits always stay in the audit log
+        )
+
+        # Push close notification.
+        try:
+            from event_notifier import notify_position_closed
+            strike   = pos.get("strike", 0)
+            opt_type = (pos.get("option_type", "") or "?")[0].upper()
+            contract = f"${strike:.0f}{opt_type}"
+            notify_position_closed(
+                ticker     = underlying,
+                contract   = contract,
+                pnl_dollar = pnl_dollar,
+                pnl_pct    = pnl_pct,
+                reason     = reason,
+                strategy   = "hft_intraday",
+            )
+        except Exception as e:
+            log.warning("notify_position_closed failed: %s", e)
     else:
-        print(f"[HFT Exec] ❌ Close failed for {option_symbol}: {order.get('error')}")
+        log.error("Close did NOT fill for %s: %s — position left open, will retry next cycle",
+                  option_symbol, fill.reason)
 
 
 def flatten_all_positions():
@@ -279,7 +499,7 @@ def flatten_all_positions():
     positions = _load_positions()
     if not positions:
         return
-    print(f"[HFT Exec] EOD flatten — closing {len(positions)} position(s)")
+    log.info("EOD flatten — closing %d position(s)", len(positions))
     for pos in positions:
         _close_position(pos, "eod_flatten")
 
@@ -296,21 +516,44 @@ def execute_hft_trade(setup: dict) -> bool:
     score     = setup.get("setup_score", 0)
 
     if direction not in ("bullish", "bearish"):
-        print(f"[HFT Exec] {ticker} — ambiguous direction '{direction}', skipping")
+        log.warning("%s — ambiguous direction '%s', skipping", ticker, direction)
         return False
 
-    print(f"\n[HFT Exec] --- {ticker} | {direction.upper()} | Score: {score} ---")
+    log.info("Processing %s | %s | Score: %d", ticker, direction.upper(), score)
 
-    risk = pre_trade_check(ticker)
+    risk = pre_trade_check(ticker, strategy="hft_intraday")
     if not risk["approved"]:
-        print(f"[HFT Exec] {ticker} blocked: {risk['reason']}")
+        log.warning("Blocked %s — %s", ticker, risk["reason"])
+        log_trade({
+            "strategy": "hft", "ticker": ticker, "approved": False,
+            "reason": risk["reason"], "setup_score": score, "direction": direction,
+            "equity": risk["equity"], "daily_pnl": risk["daily_pnl"],
+        })
+        log_decision(
+            ticker=ticker, action=ACTION_REJECTED, strategy="hft_intraday",
+            reason=f"risk: {risk['reason']}", score=score,
+            extras={"direction": direction, "signals": setup.get("active_signals", []),
+                    "daily_pnl": risk.get("daily_pnl")},
+        )
         return False
 
-    # Use a smaller position size for intraday (1% per trade vs 2%)
-    budget = risk["equity"] * 0.01
+    # Size by conviction: the proven VWAP+ORB+spike trio ("high") gets the full
+    # intraday allocation; looser "relaxed" setups are sized down because their
+    # edge hasn't been backtest-validated.
+    conviction = setup.get("conviction", "relaxed")
+    size_pct = HFT_SIZE_PCT_HIGH if conviction == "high" else HFT_SIZE_PCT_RELAXED
+    budget = risk["equity"] * size_pct
+    log.info("Sizing %s at %.1f%% (%s conviction)", ticker, size_pct * 100, conviction)
 
     contract = select_intraday_option(ticker, direction, budget)
     if not contract:
+        log_decision(
+            ticker=ticker, action=ACTION_REJECTED, strategy="hft_intraday",
+            reason=f"no qualifying 0-{MAX_FALLBACK_DTE} DTE {direction} contract "
+                   f"(liquidity/spread/OI gates)", score=score,
+            extras={"direction": direction, "conviction": conviction,
+                    "budget": round(budget, 2)},
+        )
         return False
 
     mid_price     = contract["_mid_price"]
@@ -320,36 +563,65 @@ def execute_hft_trade(setup: dict) -> bool:
     strike        = float(contract.get("strike", 0))
     opt_type      = contract["_option_type"]
 
-    quantity = calculate_contracts(budget, mid_price)
+    quantity = size_contracts(budget, mid_price, risk["equity"], strategy="hft_intraday", contract=contract)
     if quantity <= 0:
-        print(
-            f"[HFT Exec] Budget ${budget:.0f} < cost of 1 contract "
-            f"(${mid_price * 100:.0f})"
+        log.warning("Budget $%.0f < cost of 1 contract ($%.0f)", budget, mid_price * 100)
+        log_trade({"strategy": "hft", "ticker": ticker, "approved": False,
+                   "reason": "budget_too_small", "setup_score": score,
+                   "budget": budget, "entry_price": mid_price})
+        log_decision(
+            ticker=ticker, action=ACTION_REJECTED, strategy="hft_intraday",
+            reason=f"budget ${budget:.0f} ({conviction} sizing) < cost "
+                   f"${mid_price * 100:.0f} per contract", score=score,
+            extras={"direction": direction, "conviction": conviction,
+                    "option_symbol": option_symbol, "mid_price": mid_price},
         )
         return False
 
-    limit_price = round(mid_price * (1 + LIMIT_BUFFER), 2) if USE_LIMIT else None
+    # Marketable limit off the ASK (not mid) so fast/wide-spread 0-DTE orders
+    # actually fill instead of resting below the ask and getting canceled.
+    ask_price   = float(contract.get("ask", 0) or 0)
+    limit_price = _marketable_limit(ask_price, mid_price) if USE_LIMIT else None
     order_type  = "limit" if USE_LIMIT else "market"
 
-    print(
-        f"[HFT Exec] Placing {order_type} | {ticker} ${strike:.0f}{opt_type[0].upper()} "
-        f"{expiration} ({dte}DTE) | x{quantity} @ ${limit_price or 'mkt'}"
+    log.info(
+        "Placing %s | %s $%.0f%s %s (%dDTE) | x%d @ $%s",
+        order_type, ticker, strike, opt_type[0].upper(), expiration, dte,
+        quantity, limit_price if limit_price else "mkt"
     )
 
-    order = place_option_order(
+    # Place AND confirm the fill — record the real fill price/qty, not the mid.
+    fill = place_and_confirm(
         symbol=ticker,
         option_symbol=option_symbol,
         side="buy_to_open",
         quantity=quantity,
         order_type=order_type,
         price=limit_price,
+        strategy="hft_intraday",
+        fallback_price=mid_price,
+        timeout=20.0,   # intraday — don't wait long on an unfilled limit
     )
 
-    if order.get("status") == "error":
-        print(f"[HFT Exec] ❌ Order failed: {order.get('error')}")
+    if not fill.ok or fill.filled_qty <= 0:
+        log.error("Order did NOT fill for %s: %s", ticker, fill.reason)
+        log_trade({"strategy": "hft", "ticker": ticker, "approved": False,
+                   "reason": f"order_not_filled ({fill.status}): {fill.reason}",
+                   "option_symbol": option_symbol, "setup_score": score})
+        log_decision(
+            ticker=ticker, action=ACTION_REJECTED, strategy="hft_intraday",
+            reason=f"order not filled ({fill.status}): {fill.reason}", score=score,
+            extras={"direction": direction, "option_symbol": option_symbol,
+                    "limit_price": limit_price},
+        )
         return False
 
-    # Track the position
+    fill_price = float(fill.avg_fill_price) if fill.avg_fill_price > 0 else mid_price
+    filled_qty = int(fill.filled_qty)
+    if fill.partially_filled:
+        log.warning("Partial fill on %s: %d/%d contracts", ticker, filled_qty, quantity)
+
+    # Track the position at the actual fill
     _add_position({
         "option_symbol": option_symbol,
         "underlying":    ticker,
@@ -357,78 +629,163 @@ def execute_hft_trade(setup: dict) -> bool:
         "strike":        strike,
         "option_type":   opt_type,
         "direction":     direction,
-        "entry_price":   mid_price,
-        "quantity":      quantity,
-        "entry_time":    datetime.datetime.now().isoformat(),
+        "entry_price":   fill_price,
+        "quantity":      filled_qty,
+        # ET-anchored, tz-aware so monitor_hft_positions can subtract directly.
+        "entry_time":    now_est().isoformat(),
         "setup_score":   score,
         "dte":           dte,
+        "order_id":      fill.order_id,
     })
 
     record_trade(ticker)
-    print(
-        f"[HFT Exec] ✅ Trade open | {ticker} ${strike:.0f}{opt_type[0].upper()} | "
-        f"x{quantity} @ ${mid_price:.2f} | DTE: {dte}"
+    log.info(
+        "Trade OPEN | %s $%.0f%s | x%d @ $%.2f | DTE: %d",
+        ticker, strike, opt_type[0].upper(), filled_qty, fill_price, dte
     )
+
+    # Full audit entry: WHY this trade happened (signals, conviction, sizing).
+    log_decision(
+        ticker=ticker, action=ACTION_TRADED, strategy="hft_intraday",
+        reason=f"score {score} ≥ {MIN_SETUP_SCORE}, {conviction} conviction "
+               f"{direction}, filled {filled_qty} @ ${fill_price:.2f}",
+        score=score,
+        extras={
+            "direction":     direction,
+            "conviction":    conviction,
+            "signals":       setup.get("active_signals", []),
+            "signal_details": setup.get("signal_details", {}),
+            "option_symbol": option_symbol,
+            "strike":        strike,
+            "expiration":    expiration,
+            "dte":           dte,
+            "quantity":      filled_qty,
+            "entry_price":   round(fill_price, 4),
+            "cost":          round(filled_qty * fill_price * 100, 2),
+            "size_pct":      size_pct,
+            "order_id":      fill.order_id,
+        },
+        force=True,   # never collapse a real fill out of the audit log
+    )
+
+    # Push a fill notification (Telegram / email / Discord).
+    try:
+        from event_notifier import notify_trade_filled
+        notify_trade_filled(
+            strategy = "hft_intraday",
+            ticker   = ticker,
+            contract = f"${strike:.0f}{opt_type[0].upper()} {expiration} ({dte}DTE)",
+            qty      = filled_qty,
+            price    = fill_price,
+            cost     = round(filled_qty * fill_price * 100, 2),
+        )
+    except Exception as e:
+        log.warning("notify_trade_filled failed: %s", e)
+    log_trade({
+        "strategy":      "hft",
+        "ticker":        ticker,
+        "approved":      True,
+        "reason":        "all_checks_passed",
+        "setup_score":   score,
+        "direction":     direction,
+        "option_symbol": option_symbol,
+        "strike":        strike,
+        "expiration":    expiration,
+        "dte":           dte,
+        "entry_price":   fill_price,
+        "quantity":      filled_qty,
+        "order_type":    order_type,
+        "limit_price":   limit_price,
+        "order_id":      fill.order_id,
+        "cost_estimate": round(filled_qty * fill_price * 100, 2),
+        "equity":        risk["equity"],
+        "budget":        budget,
+        "daily_pnl":     risk["daily_pnl"],
+        "signals":       setup.get("active_signals", []),
+    })
     return True
 
 
 # ─── Market Hours Helpers ──────────────────────────────────────────────────────
 
 def _is_market_open() -> bool:
-    now = datetime.datetime.now()
-    if now.weekday() >= 5:
-        return False
-    open_t  = now.replace(hour=MARKET_OPEN_H,  minute=MARKET_OPEN_M,  second=0)
-    close_t = now.replace(hour=EOD_FLATTEN_H,  minute=EOD_FLATTEN_M,  second=0)
-    return open_t <= now <= close_t
+    # HFT's tradeable window ends at the EOD-flatten time, not the 15:55 close.
+    return is_market_open(MARKET_OPEN_H, MARKET_OPEN_M, EOD_FLATTEN_H, EOD_FLATTEN_M)
 
 
 def _is_new_trade_allowed() -> bool:
     """No new entries in the last 30 minutes of the session."""
-    now = datetime.datetime.now()
+    now = now_est()
     if now.weekday() >= 5:
         return False
-    open_t    = now.replace(hour=MARKET_OPEN_H,  minute=MARKET_OPEN_M,  second=0)
-    cutoff_t  = now.replace(hour=CLOSE_SCAN_H,   minute=CLOSE_SCAN_M,   second=0)
+    open_t   = now.replace(hour=MARKET_OPEN_H, minute=MARKET_OPEN_M, second=0, microsecond=0)
+    cutoff_t = now.replace(hour=CLOSE_SCAN_H,  minute=CLOSE_SCAN_M,  second=0, microsecond=0)
     return open_t <= now <= cutoff_t
 
 
 def _is_eod_flatten_time() -> bool:
-    now = datetime.datetime.now()
-    flatten_t = now.replace(hour=EOD_FLATTEN_H, minute=EOD_FLATTEN_M, second=0)
-    close_t   = now.replace(hour=15, minute=45, second=0)
+    now = now_est()
+    flatten_t = now.replace(hour=EOD_FLATTEN_H, minute=EOD_FLATTEN_M, second=0, microsecond=0)
+    close_t   = now.replace(hour=15,            minute=45,             second=0, microsecond=0)
     return flatten_t <= now <= close_t
 
 
 # ─── Main Loop ─────────────────────────────────────────────────────────────────
 
 def run():
-    print("\n" + "=" * 60)
-    print("  HFT INTRADAY BOT  —  Strategy 3  —  STARTING")
-    print(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log.info("=" * 50)
+    log.info("HFT INTRADAY BOT — Strategy 3 — STARTING")
     if MOCK_MODE:
-        print("  ⚠  MOCK_MODE — no real orders will be placed")
-    print(f"  TP: +{TAKE_PROFIT_PCT:.0%}  |  SL: -{STOP_LOSS_PCT:.0%}  |  "
-          f"Time stop: {MAX_HOLD_MINUTES}m")
-    print("=" * 60)
+        log.warning("MOCK_MODE — no real orders will be placed")
+    log.info("TP: +%.0f%%  SL: -%.0f%%  Time stop: %dm",
+             TAKE_PROFIT_PCT * 100, STOP_LOSS_PCT * 100, MAX_HOLD_MINUTES)
+    log.info("=" * 50)
+
+    # Resolve any in-flight orders from a prior crash before reconciling state.
+    try:
+        for r in recover_pending_orders():
+            if r.ok and r.filled_qty > 0:
+                log.info("Recovered fill from prior session: %s — %s", r.tag, r.reason)
+    except Exception as e:
+        log.warning("Pending-order recovery failed (non-fatal): %s", e)
+
+    # Drop any HFT positions that were closed at the broker while we were down,
+    # so we don't keep monitoring phantom positions.
+    try:
+        n = reconcile_hft_positions()
+        if n:
+            log.info("Reconciled %d stale HFT position(s) against broker", n)
+    except Exception as e:
+        log.warning("HFT position reconciliation failed (non-fatal): %s", e)
+
+    # Reconcile P&L and halt flag from broker in case of a prior crash today.
+    reconcile_from_broker()
 
     while True:
         try:
-            now_str = datetime.datetime.now().strftime("%H:%M:%S")
+            now_str = now_est().strftime("%H:%M:%S")
 
+            # HFT is intrinsically an INTRADAY strategy (5-minute bars + the
+            # prime-session gate), so there are no day-trade setups when the
+            # market is closed — unlike the swing scanners (catalyst/PEAD/bounce)
+            # which run on daily data and scan around the clock. So this loop
+            # stays idle after hours rather than burning API calls on stale bars.
             if not _is_market_open():
-                print(f"[HFT Exec] [{now_str}] Market closed — sleeping 60s")
+                log.debug("[%s] Market closed — sleeping 60s", now_str)
+                beat("hft_executor", status="idle")
                 time.sleep(60)
                 continue
 
             # EOD: force flatten then sleep until next session
             if _is_eod_flatten_time():
+                beat("hft_executor", status="eod_flatten")
                 flatten_all_positions()
-                print(f"[HFT Exec] [{now_str}] EOD flatten done — sleeping 30m")
+                log.info("[%s] EOD flatten done — sleeping 30m", now_str)
                 time.sleep(1800)
                 continue
 
-            print(f"\n[HFT Exec] [{now_str}] ── cycle start ──")
+            log.info("[%s] ── cycle start ──", now_str)
+            beat("hft_executor", status="scanning")
 
             # Step 1: monitor and exit open positions
             monitor_hft_positions()
@@ -436,10 +793,28 @@ def run():
             # Step 2: open new trades only if time allows
             if _is_new_trade_allowed():
                 setups = run_hft_scan(
+                    csv_path=scan_csv(),
                     interval=SCAN_INTERVAL,
                     min_score=MIN_SETUP_SCORE,
-                    universe_limit=75,
+                    universe_limit=SCAN_UNIVERSE_LIMIT,
+                    rotation_key="hft",
                 )
+
+                # Surface day-trade candidates beyond this process: merge them
+                # into the shared scanner-setups list (dashboard Overview card,
+                # tagged trade_style="day") and alert subscribers (deduped per
+                # ticker per day). Neither may ever block trading.
+                if setups:
+                    try:
+                        from dashboard_state import _persist_or_restore_setups
+                        _persist_or_restore_setups(setups)
+                    except Exception as e:
+                        log.warning("could not persist day setups for dashboard: %s", e)
+                    try:
+                        from event_notifier import notify_trade_setups
+                        notify_trade_setups(setups, style="day", strategy="hft_intraday")
+                    except Exception as e:
+                        log.warning("setup alert failed (non-fatal): %s", e)
 
                 trades_placed = 0
                 for setup in setups:
@@ -448,19 +823,16 @@ def run():
                     if execute_hft_trade(setup):
                         trades_placed += 1
 
-                print(
-                    f"[HFT Exec] [{now_str}] Cycle done | "
-                    f"New trades: {trades_placed} | "
-                    f"Open positions: {len(_load_positions())}"
-                )
+                log.info("[%s] Cycle done | New trades: %d | Open positions: %d",
+                         now_str, trades_placed, len(_load_positions()))
             else:
-                print(f"[HFT Exec] [{now_str}] Past new-trade cutoff — monitoring only")
+                log.debug("[%s] Past new-trade cutoff — monitoring only", now_str)
 
         except KeyboardInterrupt:
-            print("\n[HFT Exec] Stopped by user.")
+            log.info("Stopped by user.")
             break
         except Exception as e:
-            print(f"[HFT Exec] Error: {e} — retrying in 30s")
+            log.exception("Error in main loop: %s — retrying in 30s", e)
             time.sleep(30)
             continue
 
@@ -485,10 +857,7 @@ if __name__ == "__main__":
         else:
             print(f"\n{len(positions)} open HFT position(s):\n")
             for p in positions:
-                held = (
-                    datetime.datetime.now() -
-                    datetime.datetime.fromisoformat(p["entry_time"])
-                ).total_seconds() / 60
+                held = (now_est() - parse_isodt(p["entry_time"])).total_seconds() / 60
                 print(
                     f"  {p['option_symbol']} | {p['direction']} | "
                     f"Entry: ${p['entry_price']:.2f} | "

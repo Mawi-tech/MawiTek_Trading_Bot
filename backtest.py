@@ -22,6 +22,7 @@ Output:
 import os
 import json
 import datetime
+import math
 import time
 import requests
 import yfinance as yf
@@ -48,24 +49,109 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-LOOKBACK_DAYS     = 180       # 6 months
-STARTING_CAPITAL  = 10_000    # Simulated account size
+LOOKBACK_DAYS     = 730       # 2 years - captures ~4 earnings events per stock
+STARTING_CAPITAL  = 50_000    # Simulated account size (needs to afford 1 contract on large-caps)
 RISK_PER_TRADE    = 0.02      # 2% per trade
 TAKE_PROFIT_PCT   = 1.00      # +100%
 STOP_LOSS_PCT     = -0.50     # -50%
-MIN_MOMENTUM_SCORE = 40       # Same as live bot
+MIN_MOMENTUM_SCORE = 30       # Minimum composite momentum score to enter
+
+# ── Earnings IV crush (CRITICAL for an earnings strategy) ───────────────────────
+# Buying a long call the day BEFORE earnings means paying an inflated, event-rich
+# implied vol; the day AFTER earnings that event premium collapses ("IV crush"),
+# which destroys long premium even when the stock moves your way. The old model
+# priced exits with pure delta (no vega), so it ignored the single biggest P&L
+# driver of this strategy and massively OVERSTATED it. We now price entry at an
+# inflated IV and exit at a crushed IV with full Black-Scholes.
+EARNINGS_IV_INFLATE   = 1.6   # pre-earnings IV ≈ 1.6× baseline realized HV
+POST_EARNINGS_IV_MULT = 0.9   # post-earnings IV crushes to ≈ 0.9× baseline HV
+HELD_DAYS             = 2      # entry T-1, exit T+1 → ~2 calendar days elapsed
+DEBIT_SPREAD_OTM_PCT = 0.07  # Short call strike is 7% above entry (debit spread)
 TARGET_DELTA_MIN  = 0.35
 TARGET_DELTA_MAX  = 0.60
 MIN_OPEN_INTEREST = 50
 MAX_SPREAD_PCT    = 0.15
 
-# Universe to backtest — same as your live bot default
+# Universe to backtest - same as your live bot default
 BACKTEST_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "META", "AMZN", "GOOGL",
     "NFLX", "MU", "AVGO", "PLTR", "QCOM", "ADBE", "CRM", "PYPL",
     "UBER", "SHOP", "PANW", "CRWD", "SNOW", "MRVL", "ANET", "COIN",
     "NET", "DDOG", "TTD", "RBLX", "HOOD", "ABNB",
 ]
+
+
+# ─── Black-Scholes Helpers (fallback when Tradier has no historical chains) ──────
+
+def _estimate_hist_vol(ticker: str, as_of_date: str, window: int = 20) -> float:
+    """Annualized historical volatility from daily returns via yfinance."""
+    try:
+        end   = datetime.datetime.strptime(as_of_date, "%Y-%m-%d")
+        start = end - datetime.timedelta(days=window * 3)
+        df = yf.download(
+            ticker,
+            start=start.strftime("%Y-%m-%d"),
+            end=(end + datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
+            interval="1d",
+            progress=False,
+            auto_adjust=False,
+        )
+        if df.empty or len(df) < 5:
+            return 0.30
+        close = df["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        returns = close.astype(float).pct_change().dropna()
+        return float(returns.tail(window).std() * math.sqrt(252))
+    except Exception:
+        return 0.30  # default 30% vol
+
+
+def _bs_call_price(spot: float, strike: float, iv: float, dte_days: int) -> float:
+    """Full Black-Scholes call price for any strike (r=0)."""
+    if dte_days <= 0 or iv <= 0 or spot <= 0:
+        return max(0.0, spot - strike)
+    t     = dte_days / 365.0
+    sqrtT = math.sqrt(t)
+    d1 = (math.log(spot / strike) + 0.5 * iv ** 2 * t) / (iv * sqrtT)
+    d2 = d1 - iv * sqrtT
+    nd1 = 0.5 * (1 + math.erf(d1 / math.sqrt(2)))
+    nd2 = 0.5 * (1 + math.erf(d2 / math.sqrt(2)))
+    return round(max(0.01, spot * nd1 - strike * nd2), 2)
+
+
+def _bs_call_delta(spot: float, strike: float, iv: float, dte_days: int) -> float:
+    """Black-Scholes call delta for any strike (r=0)."""
+    if dte_days <= 0 or iv <= 0 or spot <= 0:
+        return 1.0 if spot > strike else 0.0
+    t  = dte_days / 365.0
+    d1 = (math.log(spot / strike) + 0.5 * iv ** 2 * t) / (iv * math.sqrt(t))
+    return round(0.5 * (1 + math.erf(d1 / math.sqrt(2))), 3)
+
+
+def _spread_exit_value(option: dict, entry_stock: float, exit_stock: float) -> float:
+    """Debit spread exit value using effective spread delta (same model as naked-call exit).
+    Spread delta = long_delta - short_delta; accounts for remaining time value at exit."""
+    spread_delta = option.get("spread_delta", 0.25)
+    stock_move   = (exit_stock - entry_stock) / entry_stock
+    exit_val     = option["entry_mid"] + spread_delta * stock_move * entry_stock
+    return max(0.01, round(exit_val, 2))
+
+
+def _bs_atm_call_price(spot: float, iv: float, dte_days: int) -> tuple[float, float]:
+    """
+    ATM call price (per share) and delta via Black-Scholes with r=0.
+    Uses same approach as backtest_hft.py for consistency.
+    Returns (price, delta).
+    """
+    if dte_days <= 0 or iv <= 0 or spot <= 0:
+        return round(spot * 0.03, 2), 0.50
+    t    = dte_days / 365.0
+    d1   = 0.5 * iv * math.sqrt(t)
+    nd1  = 0.5 * (1 + math.erf(d1 / math.sqrt(2)))
+    price = spot * (2 * nd1 - 1)
+    delta = nd1
+    return round(max(0.05, price), 2), round(max(0.30, min(0.70, delta)), 3)
 
 
 # ─── Tradier Historical Options ─────────────────────────────────────────────────
@@ -228,7 +314,7 @@ def get_past_earnings_dates(ticker: str, lookback_days: int = 180) -> list[str]:
     """
     try:
         stock   = yf.Ticker(ticker)
-        history = stock.earnings_dates
+        history = stock.get_earnings_dates(limit=32)
 
         if history is None or history.empty:
             return []
@@ -267,30 +353,28 @@ def select_historical_option(
     """
     Find the best call option to buy as of entry_date.
     Target: expiry at least 2 days after earnings, delta 0.35-0.60.
+
+    Tradier sandbox only returns future expirations, so for historical
+    earnings dates the chain is always empty. Falls back to a synthetic
+    ATM call priced via Black-Scholes so the backtest can still run.
     """
+    best       = None
+    best_score = -1.0
+
+    # ── Try Tradier (works when valid expirations are still in the future) ──
     expirations = get_expirations(ticker)
-    if not expirations:
-        return None
-
     try:
-        earn_dt  = datetime.datetime.strptime(earnings_date, "%Y-%m-%d")
-        min_exp  = earn_dt + datetime.timedelta(days=2)
-        max_exp  = earn_dt + datetime.timedelta(days=45)
+        earn_dt   = datetime.datetime.strptime(earnings_date, "%Y-%m-%d")
+        min_exp   = earn_dt + datetime.timedelta(days=2)
+        max_exp   = earn_dt + datetime.timedelta(days=45)
+        valid_exps = [
+            e for e in expirations
+            if min_exp <= datetime.datetime.strptime(e, "%Y-%m-%d") <= max_exp
+        ]
     except Exception:
-        return None
+        valid_exps = []
 
-    valid_exps = [
-        e for e in expirations
-        if min_exp <= datetime.datetime.strptime(e, "%Y-%m-%d") <= max_exp
-    ]
-
-    if not valid_exps:
-        return None
-
-    best        = None
-    best_score  = -1.0
-
-    for exp in valid_exps[:3]:  # Check up to 3 expirations for speed
+    for exp in valid_exps[:3]:
         chain = get_historical_options_chain(ticker, exp, entry_date)
         calls = [c for c in chain if c.get("option_type") == "call"]
 
@@ -315,7 +399,6 @@ def select_historical_option(
                 if mid * 100 > budget * 1.2:
                     continue
 
-                # Score: delta closest to 0.50, tight spread
                 score = (1 - abs(delta - 0.50) * 2) * 0.5 + (1 - spread_pct / MAX_SPREAD_PCT) * 0.5
                 if score > best_score:
                     best_score = score
@@ -330,7 +413,46 @@ def select_historical_option(
             except Exception:
                 continue
 
-    return best
+    if best is not None:
+        return best
+
+    # ── Fallback: synthetic long ATM call via Black-Scholes ─────────────────
+    # Used for historical dates where Tradier has no chain data (always, in
+    # sandbox). Models the LIVE structure (catalyst_long_call) and prices entry
+    # at an INFLATED pre-earnings IV; get_exit_price re-prices at the crushed
+    # post-earnings IV so the backtest reflects real earnings-vol dynamics.
+    stock_price = get_historical_quote(ticker, entry_date)
+    if stock_price <= 0:
+        return None
+
+    try:
+        earn_dt    = datetime.datetime.strptime(earnings_date, "%Y-%m-%d")
+        entry_dt   = datetime.datetime.strptime(entry_date, "%Y-%m-%d")
+        target_exp_dt = earn_dt + datetime.timedelta(days=10)
+        dte        = max(1, (target_exp_dt - entry_dt).days)
+        target_exp = target_exp_dt.strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+    hv       = _estimate_hist_vol(ticker, entry_date)
+    iv_entry = hv * EARNINGS_IV_INFLATE              # pay the pre-earnings premium
+    strike   = round(stock_price)
+    entry_price = _bs_call_price(stock_price, strike, iv_entry, dte)
+
+    if entry_price * 100 > budget * 1.5:
+        return None
+
+    return {
+        "symbol":      f"{ticker}_SIM",
+        "strike":      strike,
+        "expiration":  target_exp,
+        "entry_mid":   entry_price,
+        "delta":       _bs_call_delta(stock_price, strike, iv_entry, dte),
+        "iv_baseline": round(hv, 4),                 # for exit-side crush pricing
+        "dte":         dte,
+        "entry_stock": round(stock_price, 2),
+        "oi":          100,
+    }
 
 
 def get_exit_price(ticker: str, option: dict, exit_date: str) -> float:
@@ -338,6 +460,18 @@ def get_exit_price(ticker: str, option: dict, exit_date: str) -> float:
     Get the option mid price on the exit date.
     Falls back to stock-price-based estimate if chain unavailable.
     """
+    # Synthetic earnings call: re-price with full Black-Scholes at the CRUSHED
+    # post-earnings IV. This is what makes the backtest honest — it captures the
+    # vega loss (IV crush) that the old delta-only exit ignored, so a stock that
+    # moves your way can STILL lose money once the event premium evaporates.
+    if "iv_baseline" in option:
+        exit_stock = get_historical_quote(ticker, exit_date)
+        if exit_stock <= 0:
+            return option["entry_mid"]
+        iv_exit  = option["iv_baseline"] * POST_EARNINGS_IV_MULT
+        dte_exit = max(0.5, option.get("dte", 10) - HELD_DAYS)
+        return _bs_call_price(exit_stock, option["strike"], iv_exit, dte_exit)
+
     chain = get_historical_options_chain(ticker, option["expiration"], exit_date)
     sym   = option["symbol"]
 
@@ -353,9 +487,10 @@ def get_exit_price(ticker: str, option: dict, exit_date: str) -> float:
         entry_stock = get_historical_quote(ticker, option.get("entry_date", exit_date))
         exit_stock  = get_historical_quote(ticker, exit_date)
         if entry_stock > 0 and exit_stock > 0:
+            if "short_strike" in option:
+                return _spread_exit_value(option, entry_stock, exit_stock)
             stock_move = (exit_stock - entry_stock) / entry_stock
-            # Approximate: delta * stock move * 100 + entry mid
-            estimated = option["entry_mid"] + (option["delta"] * stock_move * entry_stock)
+            estimated  = option["entry_mid"] + (option["delta"] * stock_move * entry_stock)
             return max(0.01, round(estimated, 2))
     except Exception:
         pass
@@ -386,7 +521,7 @@ def prev_trading_day(date_str: str, offset: int = 1) -> str:
 
 def run_backtest() -> dict:
     print("\n" + "="*60)
-    print("  OPTIONS CATALYST BACKTEST — 6 MONTHS")
+    print("  OPTIONS CATALYST BACKTEST - 6 MONTHS")
     print(f"  Universe: {len(BACKTEST_UNIVERSE)} stocks")
     print(f"  Capital:  ${STARTING_CAPITAL:,.0f}")
     print(f"  Risk/trade: {RISK_PER_TRADE*100:.0f}%")
@@ -413,7 +548,7 @@ def run_backtest() -> dict:
             # Momentum filter
             mom_score = score_momentum_historical(ticker, entry_date)
             if mom_score < MIN_MOMENTUM_SCORE:
-                print(f"  {ticker} {earnings_date}: momentum {mom_score} — skip")
+                print(f"  {ticker} {earnings_date}: momentum {mom_score} - skip")
                 continue
 
             # Position sizing
@@ -422,7 +557,7 @@ def run_backtest() -> dict:
             # Select option
             option = select_historical_option(ticker, entry_date, earnings_date, budget)
             if not option:
-                print(f"  {ticker} {earnings_date}: no qualifying option — skip")
+                print(f"  {ticker} {earnings_date}: no qualifying option - skip")
                 continue
 
             option["entry_date"] = entry_date
@@ -474,11 +609,11 @@ def run_backtest() -> dict:
 
             equity_curve.append({"date": exit_date, "equity": round(equity, 2)})
 
-            result_icon = "✅" if pnl_dollar > 0 else "❌"
+            result_icon = "WIN" if pnl_dollar > 0 else "LOSS"
             print(
                 f"  {result_icon} {ticker} {earnings_date} | "
                 f"${option['strike']}C | x{contracts} | "
-                f"Entry: ${mid_entry:.2f} → Exit: ${mid_exit:.2f} | "
+                f"Entry: ${mid_entry:.2f} -> Exit: ${mid_exit:.2f} | "
                 f"P&L: {'+' if pnl_dollar >= 0 else ''}{final_pct*100:.1f}% "
                 f"(${'+' if pnl_dollar >= 0 else ''}{pnl_dollar:.0f}) | "
                 f"{exit_reason}"
@@ -555,12 +690,12 @@ def run_backtest() -> dict:
 
     # Save outputs
     df.to_csv("backtest_results.csv", index=False)
-    print("[Backtest] Trade log saved → backtest_results.csv")
+    print("[Backtest] Trade log saved -> backtest_results.csv")
 
     equity_curve_sorted = sorted(equity_curve, key=lambda x: x["date"])
     with open("backtest_equity.json", "w") as f:
         json.dump({"summary": summary, "equity_curve": equity_curve_sorted, "trades": trades}, f, indent=2)
-    print("[Backtest] Equity curve saved → backtest_equity.json")
+    print("[Backtest] Equity curve saved -> backtest_equity.json")
 
     return summary
 

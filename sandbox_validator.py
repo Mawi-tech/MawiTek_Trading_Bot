@@ -16,7 +16,6 @@ any FAIL is found, so it can be used in a shell gate:
 
 import os
 import sys
-import time
 import argparse
 import datetime
 
@@ -101,7 +100,7 @@ def check_api_keys():
 def check_tradier_connection():
     _section("Tradier API Connectivity")
     try:
-        from tradier_client import get_account_balance, MOCK_MODE, BASE_URL
+        from tradier_client import get_account_balance, MOCK_MODE
     except ImportError as e:
         _record("tradier_client import", "FAIL", str(e))
         return
@@ -175,7 +174,6 @@ def check_yfinance(quick: bool):
 
     # Price data
     try:
-        import pandas as pd
         ticker = yf.Ticker("AAPL")
         hist = ticker.history(period="5d")
         if not hist.empty:
@@ -274,15 +272,27 @@ def check_required_files():
     _section("Required Files")
     base = os.path.dirname(__file__)
     required = [
+        # Scanner pipeline
         "executor.py", "options_scanner.py", "earnings_filter.py",
-        "options_flow.py", "news_catalyst.py", "momentum_scorer.py",
-        "option_selector.py", "risk_manager.py", "position_manager.py",
-        "tradier_client.py", "config.py", "utils.py",
-        "universe.py", "market_filter.py", "dashboard_state.py",
-        "dashboard_server.py", "dashboard.html",
+        "earnings_provider.py", "options_flow.py", "news_catalyst.py",
+        "momentum_scorer.py", "option_selector.py",
+        # Risk / position / order management
+        "risk_manager.py", "position_manager.py", "order_manager.py",
+        "tradier_client.py", "state_io.py",
+        # Journaling / state
+        "trade_journal.py", "decision_log.py", "equity_tracker.py",
+        "analytics_metrics.py", "event_notifier.py", "heartbeat.py",
+        # Infrastructure
+        "logger.py", "utils.py", "universe.py", "market_filter.py",
+        # Dashboard
+        "dashboard_state.py", "dashboard_server.py", "dashboard.html",
     ]
     optional = [
+        # Strategies
         "iv_rank_bot.py", "hft_scanner.py", "hft_executor.py", "backtest_hft.py",
+        # Ops / tools
+        "start_all.py", "kill_switch.py", "daily_report.py",
+        "walk_forward.py", "lifecycle_validator.py",
     ]
     for fname in required:
         path = os.path.join(base, fname)

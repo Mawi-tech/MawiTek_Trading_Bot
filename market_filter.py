@@ -1,36 +1,51 @@
 import pandas as pd
-import yfinance as yf
 
-
-def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    yfinance sometimes returns MultiIndex columns.
-    This flattens them into normal single-level columns.
-    """
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-    return df
+from market_data import get_daily_bars
+from utils import today_est
+from state_io import read_json, atomic_write_json
 
 
 def get_daily_data(ticker: str, period: str = "3mo") -> pd.DataFrame:
-    """
-    Download daily data for a stock.
+    """Daily OHLCV for liquidity filtering via Tradier."""
+    days_map = {"3mo": 90, "1mo": 30, "6mo": 180, "1y": 365}
+    days = days_map.get(period, 90)
+    return get_daily_bars(ticker, days=days)
 
-    We use daily candles here because liquidity filters like
-    average volume and dollar volume make more sense on daily data.
-    """
-    df = yf.download(
-        tickers=ticker,
-        interval="1d",
-        period=period,
-        auto_adjust=False,
-        progress=False,
-        threads=False
-    )
 
-    df = flatten_columns(df)
-    df.dropna(inplace=True)
-    return df
+# ─── Daily liquidity cache ──────────────────────────────────────────────────────
+# Liquidity metrics (20-day avg volume / dollar volume / price) are DAILY figures
+# that don't meaningfully change within a trading session. The live scanners,
+# however, call filter_universe every cycle (the HFT loop every 60s), which used
+# to re-download daily history for every symbol on every cycle — dozens of
+# identical API calls per minute, all day.
+#
+# We cache the raw metrics per symbol, keyed by the ET trading day, on disk so
+# all three strategy processes share it. RAW metrics are cached (not the pass/
+# fail verdict) so callers passing different thresholds still get correct results.
+_LIQUIDITY_CACHE_FILE = "liquidity_cache.json"
+
+
+def _load_liquidity_cache() -> dict:
+    """Return today's cached {symbol: metrics}, or {} if missing/stale.
+
+    A new ET trading day invalidates the whole cache (daily metrics roll over).
+    """
+    data = read_json(_LIQUIDITY_CACHE_FILE, {})
+    if not isinstance(data, dict) or data.get("date") != today_est().isoformat():
+        return {}
+    metrics = data.get("metrics", {})
+    return metrics if isinstance(metrics, dict) else {}
+
+
+def _save_liquidity_cache(metrics: dict) -> None:
+    """Persist the metrics map under today's ET date (atomic, cross-process safe)."""
+    try:
+        atomic_write_json(
+            _LIQUIDITY_CACHE_FILE,
+            {"date": today_est().isoformat(), "metrics": metrics},
+        )
+    except Exception as e:
+        print(f"[Filter] Could not persist liquidity cache: {e}")
 
 
 def calculate_liquidity_metrics(df: pd.DataFrame) -> dict:
@@ -99,15 +114,16 @@ def filter_universe(
     min_price: float = 5.0,
     min_avg_volume: float = 1_000_000,
     min_avg_dollar_volume: float = 20_000_000,
-    max_symbols: int | None = None
+    max_symbols: int | None = None,
+    use_cache: bool = True,
 ) -> list[str]:
     """
     Filter a universe of symbols down to tradable/liquid names.
 
     This function:
-    1. Downloads daily data for each symbol
-    2. Computes liquidity metrics
-    3. Keeps only symbols that meet our minimum standards
+    1. Looks up each symbol's daily liquidity metrics (cached per ET day) —
+       downloading daily data only on a cache miss
+    2. Keeps only symbols that meet our minimum standards
 
     Args:
         symbols: List of ticker symbols to test
@@ -115,40 +131,39 @@ def filter_universe(
         min_avg_volume: Minimum average daily share volume
         min_avg_dollar_volume: Minimum average daily dollar volume
         max_symbols: Optional cap on how many filtered names to return
+        use_cache: Reuse today's cached metrics instead of re-downloading
+                   (set False to force a fresh fetch, e.g. in tests)
 
     Returns:
         A filtered list of symbols that pass the liquidity screen.
     """
-    filtered = []
-
-    print(f"[Filter] Checking {len(symbols)} symbols for liquidity...")
+    filtered: list[str] = []
+    cache = _load_liquidity_cache() if use_cache else {}
+    cache_hits = 0
+    fetched = 0
 
     for ticker in symbols:
         try:
-            df = get_daily_data(ticker)
+            metrics = cache.get(ticker) if use_cache else None
 
-            if df.empty or len(df) < 20:
-                print(f"[Filter] {ticker}: skipped (not enough daily data)")
-                continue
+            if metrics is None:
+                df = get_daily_data(ticker)
+                if df.empty or len(df) < 20:
+                    # Don't cache a no-data verdict — it may be a transient
+                    # fetch failure; allow a retry on the next cycle.
+                    continue
+                metrics = calculate_liquidity_metrics(df)
+                cache[ticker] = metrics
+                fetched += 1
+            else:
+                cache_hits += 1
 
-            metrics = calculate_liquidity_metrics(df)
-
-            passes = passes_liquidity_filter(
+            if passes_liquidity_filter(
                 metrics=metrics,
                 min_price=min_price,
                 min_avg_volume=min_avg_volume,
-                min_avg_dollar_volume=min_avg_dollar_volume
-            )
-
-            print(
-                f"[Filter] {ticker} | "
-                f"Close={metrics['last_close']:.2f} | "
-                f"AvgVol20={metrics['avg_volume_20']:.0f} | "
-                f"AvgDollarVol20={metrics['avg_dollar_volume_20']:.0f} | "
-                f"Pass={passes}"
-            )
-
-            if passes:
+                min_avg_dollar_volume=min_avg_dollar_volume,
+            ):
                 filtered.append(ticker)
 
             # Optional early stop if you only want a subset for testing
@@ -158,5 +173,12 @@ def filter_universe(
         except Exception as e:
             print(f"[Filter] Error with {ticker}: {e}")
 
-    print(f"[Filter] Kept {len(filtered)} of {len(symbols)} symbols.")
+    # Persist only when we actually fetched something new this call.
+    if use_cache and fetched:
+        _save_liquidity_cache(cache)
+
+    print(
+        f"[Filter] Kept {len(filtered)}/{len(symbols)} liquid "
+        f"({cache_hits} cached, {fetched} fetched)."
+    )
     return filtered

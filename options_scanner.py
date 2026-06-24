@@ -13,7 +13,6 @@ Outputs a ranked watchlist of the best setups,
 ready for manual or automated call entry.
 """
 
-import os
 import datetime
 import pandas as pd
 
@@ -97,7 +96,8 @@ def score_setup(
 def run_options_scanner(
     csv_path: str | None = "sp500.csv",
     universe_limit: int = 100,
-    output_csv: bool = True
+    output_csv: bool = True,
+    rotation_key: str | None = None
 ) -> list[dict]:
     """
     Full pipeline:
@@ -117,15 +117,16 @@ def run_options_scanner(
     print("="*60 + "\n")
 
     # Step 1: Universe
-    raw_symbols = load_universe(csv_path=csv_path, limit=universe_limit)
+    raw_symbols = load_universe(csv_path=csv_path, limit=universe_limit, rotation_key=rotation_key)
     print(f"\n[Scanner] Loaded {len(raw_symbols)} symbols\n")
 
-    # Step 2: Liquidity filter
+    # Step 2: Liquidity filter — cut micro-caps / thin names (matches the
+    # universe screen so a name that slips through still gets gated live).
     liquid_symbols = filter_universe(
         symbols=raw_symbols,
         min_price=5.0,
-        min_avg_volume=500_000,
-        min_avg_dollar_volume=10_000_000
+        min_avg_volume=1_000_000,
+        min_avg_dollar_volume=20_000_000
     )
     print(f"\n[Scanner] {len(liquid_symbols)} symbols passed liquidity filter\n")
 
@@ -195,7 +196,7 @@ def run_options_scanner(
             include = filters_passed >= MIN_FILTERS_PASSED
 
         if not include:
-            print(f"[Scanner] {ticker} — skipped ({filters_passed}/4 filters passed)")
+            print(f"[Scanner] {ticker} skipped ({filters_passed}/4 filters passed)")
             continue
 
         # Composite setup score
@@ -206,22 +207,48 @@ def run_options_scanner(
             momentum_score=momentum_score
         )
 
+        # ── Day vs swing suitability ──────────────────────────────────────
+        # A catalyst setup is inherently a SWING candidate (the catalyst plays
+        # out over days). It is ADDITIONALLY flagged day-tradable when intraday
+        # momentum + volume are strong enough to scalp while the catalyst
+        # builds — that flag is informational for the dashboard/alerts; the
+        # actual day-trading entries come from the HFT scanner.
+        vol_surge = momentum_result["components"].get("volume_surge") or 0
+        day_trade_ok = momentum_score >= 60 and vol_surge >= 1.5
+
+        why_bits = []
+        if earnings_days is not None:
+            why_bits.append(f"earnings in {earnings_days}d")
+        if news_result["has_catalyst"]:
+            why_bits.append("news catalyst")
+        if flow_confirmed:
+            why_bits.append("bullish options flow")
+        if momentum_ok:
+            why_bits.append(f"momentum {momentum_score}/100")
+        style_reason = "swing: " + (", ".join(why_bits) or "catalyst setup")
+        if day_trade_ok:
+            style_reason += f" · also day-tradable (momentum {momentum_score}, vol {vol_surge:.1f}x)"
+
         result = {
             "ticker": ticker,
             "setup_score": setup_score,
+            "trade_style": "swing",          # catalyst plays are multi-day holds
+            "day_trade_ok": day_trade_ok,    # strong enough to also scalp intraday
+            "style_reason": style_reason,    # human-readable "why" for dashboard/alerts
             "days_until_earnings": earnings_days,
             "options_flow": flow_confirmed,
             "news_catalyst": news_result["has_catalyst"],
             "news_headline": news_result["top_headline"],
             "momentum_score": momentum_score,
             "filters_passed": filters_passed,
+            "filters": filters,              # which individual filters fired (audit detail)
             "rsi": momentum_result["components"].get("rsi", None),
             "roc_5d": momentum_result["components"].get("roc_5d", None),
             "vol_surge": momentum_result["components"].get("volume_surge", None),
         }
 
         results.append(result)
-        print(f"[Scanner] ✅ {ticker} — Setup score: {setup_score}/100 | Filters: {filters_passed}/4")
+        print(f"[Scanner] PASS {ticker} | Score: {setup_score}/100 | Filters: {filters_passed}/4")
 
     # Step 6: Sort by score
     results.sort(key=lambda x: x["setup_score"], reverse=True)

@@ -14,17 +14,48 @@ credentials.json
 risk_state.json
 pnl_history.json
 positions.json
+open_positions.json
 dashboard_state.json
 .universe_state.json
+halt_events.json
+earnings_cache.json
+
+# ── Trade data (append-only, machine-local) ──────────────────────────────
+closed_trades.json
+equity_curve.json
+decision_log.jsonl
+hft_positions.json
+iv_rank_positions.json
+
+# ── Order execution / ops state (machine-local) ──────────────────────────
+pending_orders.json
+last_summary.json
+scanner_setups.json
+heartbeats/
+*.lock
+
+# ── Quarantined files pending deletion ───────────────────────────────────
+_REMOVE_ME/
 
 # ── Logs ──────────────────────────────────────────────────────────────────
 logs/
 *.log
 
-# ── Backtest outputs ──────────────────────────────────────────────────────
+# ── Backtest outputs (regeneratable) ─────────────────────────────────────
 backtest_hft_*.csv
+backtest_results.csv
+backtest_iv_rank.csv
+backtest_orb.csv
+backtest_vwap_bounce.csv
+backtest_equity.json
+backtest_iv_rank.json
+backtest_orb.json
+backtest_vwap_bounce.json
 setups_*.csv
 iv_rank_*.csv
+
+# ── Debug artifacts ──────────────────────────────────────────────────────
+emoji_scan.txt
 
 # ── Python build / cache ──────────────────────────────────────────────────
 __pycache__/
@@ -60,3 +91,24 @@ Thumbs.db
 
 # ── OS junk ──────────────────────────────────────────────────────────────
 desktop.ini
+
+# ── More machine-local state / caches (added before first GitHub push) ────
+# All strategy position books (open/hft/iv_rank/pead/bounce + any future ones)
+# — these hold real account holdings, never commit them.
+*_positions.json
+# User-set risk/alert config + runtime control state (machine-local)
+user_config.json
+control_state.json
+# Caches + feeds the bot regenerates at runtime
+events.json
+iv_cache.json
+iv_history.json
+liquidity_cache.json
+news_feed.json
+social_sentiment.json
+portfolio_greeks.json
+sec_cik_map.json
+
+# ── IDE / tooling local state ─────────────────────────────────────────────
+.vs/
+.claude/

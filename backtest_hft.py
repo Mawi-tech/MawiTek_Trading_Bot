@@ -31,22 +31,26 @@ import sys
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
+import hft_scanner
 from hft_scanner import (
-    fetch_intraday,
     compute_vwap,
     detect_vwap_reclaim,
     detect_orb_breakout,
     detect_volume_spike,
     detect_momentum_burst,
     detect_trend_alignment,
+    detect_range_breakout,
+    detect_vwap_bounce,
+    detect_strong_bar,
+    resolve_direction,
+    hft_conviction,
     score_hft_setup,
     is_prime_session,
     INVERSE_ETF_LIST,
     MIN_SIGNAL_SCORE,
 )
-from universe import DEFAULT_UNIVERSE
+from market_data import get_intraday_bars
 
 
 # --- S&P 500 Universe Loader --------------------------------------------------
@@ -175,9 +179,12 @@ DEFAULT_DAYS        = 30
 DEFAULT_INTERVAL    = "5m"
 STARTING_CAPITAL    = 10_000.0
 RISK_PER_TRADE_PCT  = 0.01      # 1% of account per trade (intraday sizing)
-TAKE_PROFIT_PCT     = 0.30
-STOP_LOSS_PCT       = 0.25
-MAX_HOLD_BARS       = 9         # ~45 min at 5m bars
+# Asymmetric exits — see hft_executor.py. Validated Jun 2026: flips the strategy
+# from PF ~1.0 (breakeven/negative) to PF ~1.6 on two independent samples by
+# letting convex option winners run while cutting losers fast.
+TAKE_PROFIT_PCT     = 1.00      # was 0.30
+STOP_LOSS_PCT       = 0.20      # was 0.25
+MAX_HOLD_BARS       = 12        # ~60 min at 5m bars (was 9 / ~45 min)
 COMMISSION_PER_LEG  = 0.65      # $ per contract per leg (typical retail)
 SLIPPAGE_PCT        = 0.02      # 2% slippage on fill (wide spread for 0DTE)
 
@@ -280,8 +287,10 @@ def backtest_ticker(
 
     Returns a results dict with P&L, win rate, and trade log.
     """
-    period = f"{days}d"
-    df = fetch_intraday(ticker, interval=interval, period=period)
+    # Pull the FULL multi-day intraday history directly from the data layer
+    # with the integer day count (the old period-string path silently capped
+    # anything beyond 5 days down to a single day).
+    df = get_intraday_bars(ticker, interval=interval, days=days)
 
     if df.empty or len(df) < 30:
         print(f"[Backtest] {ticker} — insufficient intraday data")
@@ -308,29 +317,34 @@ def backtest_ticker(
         if not is_prime_session(bar_time):
             continue
 
-        window = df.iloc[:i + 1]
+        # Slice to the CURRENT session day so VWAP/ORB/etc. reset daily, exactly
+        # like the live scanner (which only ever sees one day of data).
+        full_window = df.iloc[:i + 1]
+        today       = df.index[i].date()
+        window      = full_window[full_window.index.date == today]
+        if len(window) < 15:        # not enough intraday bars yet this session
+            continue
         vwap   = compute_vwap(window)
 
-        # Determine direction before scoring (needed for trend modifier)
-        orb_result  = detect_orb_breakout(window)
-        vwap_result = detect_vwap_reclaim(window, vwap)
-        orb_dir     = orb_result.get("direction", "none")
-        vwap_sig    = vwap_result.get("signal", False)
-        direction   = orb_dir if orb_dir in ("bullish", "bearish") else (
-            "bullish" if vwap_sig else "bullish"
-        )
-
+        # Mirror scan_ticker EXACTLY so the backtest validates the LIVE logic:
+        # compute every signal, then resolve direction from them (a weighted vote
+        # in bidirectional mode, ORB→range→bullish in long-only mode).
         signals = {
-            "vwap":     vwap_result,
-            "orb":      orb_result,
-            "spike":    detect_volume_spike(window),
-            "momentum": detect_momentum_burst(window),
-            "trend":    detect_trend_alignment(window),
+            "vwap":       detect_vwap_reclaim(window, vwap),
+            "orb":        detect_orb_breakout(window),
+            "spike":      detect_volume_spike(window),
+            "range":      detect_range_breakout(window),
+            "bounce":     detect_vwap_bounce(window, vwap),
+            "momentum":   detect_momentum_burst(window),
+            "strong_bar": detect_strong_bar(window),
+            "trend":      detect_trend_alignment(window),
         }
+        direction = resolve_direction(signals)
 
         score = score_hft_setup(signals, direction=direction)
         if score < min_score:
             continue
+        conviction = hft_conviction(signals, direction)
 
         entry_bar    = df.iloc[i]
         entry_price  = float(entry_bar["Close"])
@@ -411,6 +425,7 @@ def backtest_ticker(
             "pnl":         pnl,
             "exit_reason": exit_reason,
             "score":       score,
+            "conviction":  conviction,
             "signals":     ", ".join(active_sigs),
         }
         trades.append(trade)
@@ -489,6 +504,7 @@ def run_backtest(
     output_csv: bool = True,
     use_universe: bool = False,
     max_tickers: int | None = None,
+    bidirectional: bool = False,
 ) -> list[dict]:
     """
     Run the HFT backtest across multiple tickers and print a summary table.
@@ -497,14 +513,22 @@ def run_backtest(
         tickers:       Explicit ticker list (ignored when use_universe=True).
         use_universe:  If True, fetch the full S&P 500 from Wikipedia.
         max_tickers:   Cap the universe size (useful for quick test runs).
+        bidirectional: Enable long+short signal generation for this run (sets
+                       hft_scanner.ENABLE_BIDIRECTIONAL_SIGNALS). Use this to
+                       validate the bearish signals before turning them on live.
     """
+    # The detectors read this module-level flag directly, so flipping it here
+    # changes the behavior of every signal call for the duration of the run.
+    hft_scanner.ENABLE_BIDIRECTIONAL_SIGNALS = bidirectional
+
     if use_universe:
         tickers = fetch_sp500_tickers(max_tickers=max_tickers)
     elif max_tickers:
         tickers = tickers[:max_tickers]
 
     print("\n" + "=" * 70)
-    print("  HFT BACKTEST  —  Strategy 3")
+    print("  HFT BACKTEST  —  Strategy 3"
+          + ("   [BIDIRECTIONAL: long+short]" if bidirectional else "   [long-only]"))
     if use_universe:
         print(f"  Universe: S&P 500  ({len(tickers)} tickers)")
     else:
@@ -604,6 +628,18 @@ def run_backtest(
                 f"total ${row['sum']:+.2f}"
             )
 
+        # Conviction breakdown — the key check for the new looser triggers.
+        # "high" = proven VWAP+ORB+spike trio; "relaxed" = looser confluence.
+        if "conviction" in df_all.columns:
+            print("\n  By conviction (high = proven trio, relaxed = new looser triggers):")
+            conv = df_all.groupby("conviction")["pnl"].agg(["count", "mean", "sum"])
+            for name, row in conv.iterrows():
+                wins = (df_all[df_all["conviction"] == name]["pnl"] >= 0).mean() * 100
+                print(
+                    f"    {name:<8} n={int(row['count']):>4} | "
+                    f"win {wins:>4.0f}% | avg ${row['mean']:+.2f} | total ${row['sum']:+.2f}"
+                )
+
         if output_csv:
             fname = f"backtest_hft_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.csv"
             df_all.to_csv(fname, index=False)
@@ -644,6 +680,9 @@ Examples:
                         help=f"Minimum signal score (default {MIN_SIGNAL_SCORE})")
     parser.add_argument("--show-trades",  action="store_true",
                         help="Print every individual trade during backtest")
+    parser.add_argument("--bidirectional", action="store_true",
+                        help="Enable long+short signals for this run "
+                             "(validates the bearish signals before going live)")
     parser.add_argument("--no-csv",       action="store_true",
                         help="Skip saving trade log CSV")
     args = parser.parse_args()
@@ -657,4 +696,5 @@ Examples:
         output_csv=not args.no_csv,
         use_universe=args.universe,
         max_tickers=args.max_tickers,
+        bidirectional=args.bidirectional,
     )

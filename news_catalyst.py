@@ -9,7 +9,8 @@ or integrate a paid news API (Benzinga, Unusual Whales news feed).
 """
 
 import datetime
-import yfinance as yf
+
+from market_data import get_news as _tradier_news
 
 
 # Keywords that suggest a bullish catalyst
@@ -67,18 +68,12 @@ def _get_publish_time(article: dict) -> int | None:
 
 def fetch_recent_news(ticker: str, max_articles: int = 10) -> list[dict]:
     """
-    Fetch recent news headlines from yfinance.
+    Fetch recent news headlines via Tradier /markets/news.
 
-    Returns a list of dicts with keys: title, publisher, link, publish_time
+    Returns a list of dicts with keys: title, providerPublishTime, link, publisher
+    (same shape as the old yfinance response so the rest of this module is unchanged)
     """
-    try:
-        stock = yf.Ticker(ticker)
-        news = stock.news or []
-        return news[:max_articles]
-
-    except Exception as e:
-        print(f"[News] Error fetching news for {ticker}: {e}")
-        return []
+    return _tradier_news(ticker, max_articles=max_articles)
 
 
 def score_headline(title: str) -> int:
@@ -136,7 +131,9 @@ def has_news_catalyst(
             "article_count": 0
         }
 
-    now = datetime.datetime.utcnow().timestamp()
+    # utcnow() was deprecated in Python 3.12; use an explicit tz-aware UTC now
+    # so the Unix timestamp comparison is correct on every Python version.
+    now = datetime.datetime.now(datetime.timezone.utc).timestamp()
     cutoff = now - (lookback_hours * 3600)
 
     # Detect whether any article has a parseable timestamp so we can decide
