@@ -1,21 +1,25 @@
 """
 options_flow.py
 
-Detects unusual call activity using yfinance volume-to-open-interest (V/OI)
-ratio combined with notional premium estimation.
+Detects unusual call activity using volume-to-open-interest (V/OI) ratio
+combined with notional premium estimation.
 
 A high V/OI ratio (default 0.5+) indicates aggressive call buying relative
 to existing positioning — often a precursor to a directional move.
 
-Replaces the previous Unusual Whales API integration ($125/month) with
-a free yfinance-based detection method. No API key required.
+Data source: Tradier options chain + quote (replaces the old yfinance approach).
+No extra API key required — uses the same Tradier credentials as the broker.
 
-Public API (kept stable for options_scanner.py):
+Public API (stable for options_scanner.py):
 - has_bullish_flow(ticker, min_premium) -> bool
 - get_bullish_sweep_tickers(min_premium, limit, symbols=None) -> list[dict]
 """
 
-import yfinance as yf
+from tradier_client import get_options_expirations, get_options_chain, get_quote
+from market_data import chain_to_df
+from logger import get_logger
+
+log = get_logger("options_flow")
 
 
 # ─── Config ────────────────────────────────────────────────────────────────────
@@ -43,40 +47,31 @@ def _estimate_call_premium(calls_df, spot_price: float) -> float:
 
     low  = spot_price * (1 - ATM_LOWER_PCT)
     high = spot_price * (1 + ATM_UPPER_PCT)
-    atm = calls_df[(calls_df["strike"] >= low) & (calls_df["strike"] <= high)]
+    atm  = calls_df[
+        (calls_df["strike"] >= low) & (calls_df["strike"] <= high)
+    ]
 
     if atm.empty:
         return 0.0
 
-    bid = atm["bid"].fillna(0)
-    ask = atm["ask"].fillna(0)
+    bid  = atm["bid"].fillna(0)
+    ask  = atm["ask"].fillna(0)
     last = atm["lastPrice"].fillna(0)
 
     # Mid where bid+ask available, else fall back to lastPrice
     mid = (bid + ask) / 2
     mid = mid.where(mid > 0, last)
 
-    volume = atm["volume"].fillna(0)
+    volume   = atm["volume"].fillna(0)
     notional = (volume * mid * 100).sum()
     return float(notional)
-
-
-def _spot_price(tk: yf.Ticker) -> float | None:
-    """Get the most recent close for the underlying."""
-    try:
-        hist = tk.history(period="2d", auto_adjust=False)
-        if hist is None or hist.empty:
-            return None
-        return float(hist["Close"].iloc[-1])
-    except Exception:
-        return None
 
 
 # ─── Public API ────────────────────────────────────────────────────────────────
 
 def has_bullish_flow(ticker: str, min_premium: float = 50_000) -> bool:
     """
-    Per-ticker bullish flow check.
+    Per-ticker bullish flow check via Tradier.
 
     Returns True when BOTH conditions are met:
       - Total call volume / open interest >= MIN_VOI_RATIO
@@ -85,28 +80,28 @@ def has_bullish_flow(ticker: str, min_premium: float = 50_000) -> bool:
     Scans the next EXPIRIES_TO_SCAN expirations and aggregates.
     """
     try:
-        tk = yf.Ticker(ticker)
-
-        spot = _spot_price(tk)
+        # Spot price from Tradier quote
+        spot = get_quote(ticker)
         if not spot or spot <= 0:
             return False
 
-        expiries = list(tk.options[:EXPIRIES_TO_SCAN]) if tk.options else []
+        # Expirations from Tradier
+        expiries = get_options_expirations(ticker)[:EXPIRIES_TO_SCAN]
         if not expiries:
             return False
 
-        total_volume = 0.0
-        total_oi     = 0.0
+        total_volume  = 0.0
+        total_oi      = 0.0
         total_premium = 0.0
 
         for exp in expiries:
-            try:
-                chain = tk.option_chain(exp)
-            except Exception:
+            chain = get_options_chain(ticker, exp)
+            if not chain:
                 continue
 
-            calls = chain.calls
-            if calls is None or calls.empty:
+            # Convert Tradier chain list → DataFrame with yfinance-compatible columns
+            calls = chain_to_df(chain, option_type="call")
+            if calls.empty:
                 continue
 
             total_volume  += float(calls["volume"].fillna(0).sum())
@@ -117,16 +112,14 @@ def has_bullish_flow(ticker: str, min_premium: float = 50_000) -> bool:
             return False
 
         voi_ratio = total_volume / total_oi
-        result = (voi_ratio >= MIN_VOI_RATIO) and (total_premium >= min_premium)
+        result    = (voi_ratio >= MIN_VOI_RATIO) and (total_premium >= min_premium)
 
-        print(
-            f"[OptionsFlow] {ticker} | V/OI: {voi_ratio:.2f} | "
-            f"Premium: ${total_premium:,.0f} | Bullish: {result}"
-        )
+        log.debug("%s | V/OI: %.2f | Premium: $%.0f | Bullish: %s",
+                  ticker, voi_ratio, total_premium, result)
         return result
 
     except Exception as e:
-        print(f"[OptionsFlow] Error checking {ticker}: {e}")
+        log.warning("has_bullish_flow(%s): %s", ticker, e)
         return False
 
 

@@ -126,6 +126,16 @@
 let allTrades = [];
 let equityChart, distChart, exitChart;
 
+function esc(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 async function loadData() {
   try {
     const res = await fetch('backtest_equity.json?t=' + Date.now());
@@ -273,8 +283,8 @@ function renderBestWorst(trades) {
   function row(t) {
     const cls = t.pnl_pct >= 0 ? 'up' : 'dn';
     return `<tr>
-      <td style="font-weight:500">${t.ticker}</td>
-      <td style="color:var(--muted);font-size:11px">${t.earnings_date}</td>
+      <td style="font-weight:500">${esc(t.ticker)}</td>
+      <td style="color:var(--muted);font-size:11px">${esc(t.earnings_date)}</td>
       <td class="${cls}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%</td>
       <td class="${cls}">${t.pnl_dollar >= 0 ? '+$' : '-$'}${Math.abs(t.pnl_dollar).toFixed(0)}</td>
     </tr>`;
@@ -310,20 +320,20 @@ function renderAllTrades(trades) {
   document.getElementById('allTradesBody').innerHTML = list.map(t => {
     const cls = t.pnl_pct >= 0 ? 'up' : 'dn';
     const badge = exitBadge[t.exit_reason] || 'b-gray';
-    const label = exitLabel[t.exit_reason] || t.exit_reason;
+    const label = exitLabel[t.exit_reason] || esc(t.exit_reason);
     return `<tr>
-      <td style="font-weight:500">${t.ticker}</td>
-      <td style="color:var(--muted);font-size:11px">${t.earnings_date}</td>
-      <td style="color:var(--muted);font-size:11px">${t.entry_date}</td>
-      <td>$${t.strike}</td>
-      <td>${t.delta}</td>
-      <td>${t.contracts}</td>
+      <td style="font-weight:500">${esc(t.ticker)}</td>
+      <td style="color:var(--muted);font-size:11px">${esc(t.earnings_date)}</td>
+      <td style="color:var(--muted);font-size:11px">${esc(t.entry_date)}</td>
+      <td>$${esc(t.strike)}</td>
+      <td>${esc(t.delta)}</td>
+      <td>${esc(t.contracts)}</td>
       <td>$${t.entry_mid.toFixed(2)}</td>
       <td>$${t.exit_mid.toFixed(2)}</td>
       <td class="${cls}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%</td>
       <td class="${cls}">${t.pnl_dollar >= 0 ? '+$' : '-$'}${Math.abs(t.pnl_dollar).toFixed(0)}</td>
       <td><span class="badge ${badge}">${label}</span></td>
-      <td>${t.momentum_score}</td>
+      <td>${esc(t.momentum_score)}</td>
     </tr>`;
   }).join('');
 }

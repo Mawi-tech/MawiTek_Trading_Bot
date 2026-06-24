@@ -17,6 +17,51 @@ DEFAULT_UNIVERSE = [
 # Lives next to this module — tiny JSON, safe to delete.
 _STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".universe_state.json")
 
+# Universe CSV filenames. The full-market list (update_universe.py) and the
+# pre-screened liquid list (screen_universe.py) are preferred when present; the
+# S&P 500 file is the back-compat fallback.
+MARKET_UNIVERSE_CSV = "market_universe.csv"   # full US market, ~10k raw symbols
+LIQUID_UNIVERSE_CSV = "liquid_universe.csv"   # screened: illiquid + micro-caps removed
+SP500_CSV = "sp500.csv"
+
+
+def market_csv() -> str:
+    """
+    Absolute path to the broadest available RAW universe CSV (the screener's input).
+
+    Prefers the full-market list (market_universe.csv) when it exists, then the
+    S&P 500 list. Returns the bare "sp500.csv" name if neither exists yet (so a
+    relative-path load still works from the bot's working directory, and
+    load_universe falls back to the built-in list if even that is missing).
+
+    Generate the files with `python update_universe.py`.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in (MARKET_UNIVERSE_CSV, SP500_CSV):
+        path = os.path.join(here, name)
+        if os.path.exists(path):
+            return path
+    return SP500_CSV
+
+
+def scan_csv() -> str:
+    """
+    Absolute path to the universe the LIVE scanners should rotate through.
+
+    Prefers the pre-screened LIQUID universe (liquid_universe.csv — illiquid
+    names and micro-caps removed, so every scan cycle is spent on tradable
+    names), then the full market, then the S&P 500. Build/refresh the liquid
+    list with `python screen_universe.py` (weekly). The per-scan liquidity
+    filter still re-validates each name live, so a slightly stale liquid list
+    is safe.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in (LIQUID_UNIVERSE_CSV, MARKET_UNIVERSE_CSV, SP500_CSV):
+        path = os.path.join(here, name)
+        if os.path.exists(path):
+            return path
+    return SP500_CSV
+
 
 # ─── Symbol cleanup helpers ────────────────────────────────────────────────────
 
@@ -174,26 +219,33 @@ def load_universe(
     csv_path: str | None = None,
     csv_column: str = "Symbol",
     limit: int | None = None,
-    mode: str = "rotate"
+    mode: str = "rotate",
+    rotation_key: str | None = None
 ) -> list[str]:
     """
     Load the market universe from CSV if available, otherwise the built-in fallback.
 
     Args:
-        csv_path:   Optional path to a CSV with a Symbol column.
-        csv_column: Column name in the CSV (default "Symbol").
-        limit:      Maximum number of symbols to return. If None, returns the full list.
-        mode:       Slicing mode when `limit` is set:
-                      "head"   — first N (alphabetical blind spot — back-compat only)
-                      "random" — N random symbols each call
-                      "rotate" — rolling window with persistent offset (DEFAULT)
+        csv_path:     Optional path to a CSV with a Symbol column.
+        csv_column:   Column name in the CSV (default "Symbol").
+        limit:        Maximum number of symbols to return. If None, returns the full list.
+        mode:         Slicing mode when `limit` is set:
+                        "head"   — first N (alphabetical blind spot — back-compat only)
+                        "random" — N random symbols each call
+                        "rotate" — rolling window with persistent offset (DEFAULT)
+        rotation_key: Persistent-offset bucket for "rotate" mode. Each distinct key
+                      keeps its OWN rolling offset, so separate scanners (catalyst,
+                      hft, pead, bounce) each sweep the full universe independently
+                      instead of sharing one pointer (where the fast scanner would
+                      consume most of the advancement and starve the slow ones).
+                      Defaults to the CSV/built-in bucket for back-compat.
 
     Priority:
         1. CSV file (if provided and loadable)
         2. Built-in fallback list
     """
     symbols: list[str] = []
-    state_key = "csv" if csv_path else "default"
+    state_key = rotation_key or ("csv" if csv_path else "default")
 
     if csv_path:
         try:
@@ -205,7 +257,8 @@ def load_universe(
 
     if not symbols:
         symbols = dedupe_symbols(DEFAULT_UNIVERSE)
-        state_key = "default"
+        if not rotation_key:
+            state_key = "default"
         print(f"[Universe] Loaded {len(symbols)} symbols from built-in fallback list.")
 
     sliced = _slice_universe(symbols, limit, mode, state_key=state_key)

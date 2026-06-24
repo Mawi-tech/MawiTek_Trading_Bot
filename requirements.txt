@@ -3,3 +3,6 @@ pandas
 ta
 python-dotenv
 requests
+
+# ── Dev / testing ──────────────────────────────────────────────────────────
+pytest
