@@ -409,12 +409,13 @@ def run():
             if market_open:
                 try:
                     snap = snapshot_equity()
-                    print(
-                        f"[Executor] Equity snapshot | "
-                        f"Equity: ${snap['equity']:,.2f} | "
-                        f"Unrealized: ${snap['unrealized_pnl']:+,.2f} | "
-                        f"Realized today: ${snap['realized_today']:+,.2f}"
-                    )
+                    if snap:
+                        print(
+                            f"[Executor] Equity snapshot | "
+                            f"Equity: ${snap['equity']:,.2f} | "
+                            f"Unrealized: ${snap['unrealized_pnl']:+,.2f} | "
+                            f"Realized today: ${snap['realized_today']:+,.2f}"
+                        )
                 except Exception as e:
                     print(f"[Executor] Equity snapshot failed (non-fatal): {e}")
 
