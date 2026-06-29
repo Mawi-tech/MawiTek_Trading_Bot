@@ -172,6 +172,8 @@ python dashboard_server.py
 |---|---|---|
 | Risk per trade | 3% of equity | `risk_manager.py` → `RISK_PER_TRADE_PCT` |
 | Daily loss limit (halt) | 5% of equity | `risk_manager.py` → `DAILY_LOSS_LIMIT_PCT` |
+| Drawdown governor (profit protection) | graduated de-risk from the high-water mark — half size at −6%, quarter at −10%, **halt new entries at −13%**. Catches the slow multi-day bleed the daily halt resets through. HWM ratchets up and persists; anchors at current equity on first run. | `risk_manager.py` → `DRAWDOWN_GOVERNOR`, `DD_*_PCT` |
+| Rolling weekly loss limit | halt new entries if trailing 5-trading-day P&L ≤ −8% | `risk_manager.py` → `WEEKLY_LOSS_LIMIT_PCT` |
 | Max swing positions | 8 (catalyst + iv_rank + pead + bounce) | `risk_manager.py` → `MAX_SWING_POSITIONS` |
 | Max day positions | 5 (hft intraday) | `risk_manager.py` → `MAX_DAY_POSITIONS` |
 | Max total positions | 13 (swing + day) | `risk_manager.py` → `MAX_OPEN_POSITIONS` |

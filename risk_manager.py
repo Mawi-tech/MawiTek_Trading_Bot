@@ -64,6 +64,23 @@ LONG_DIRECTIONAL_STRATEGIES = {"catalyst_long_call", "pead"}
 # bounce is the bot's bear-market offense; throttling it would defeat the purpose.
 BEAR_THROTTLE_EXEMPT = {"bounce"}
 
+# ── Drawdown governor (protect profits from a slow bleed) ───────────────────────
+# The daily-loss halt (above) resets every midnight, so a grind of small daily
+# losses walks straight through it — e.g. the account fell ~17% over a month with
+# no single -5% day. The governor instead measures loss from the HIGH-WATER MARK
+# (peak equity, ratcheted up and persisted) and over a rolling week, de-risking
+# NEW entries gradually before halting them entirely. It never touches existing
+# positions — those ride to their own TP/SL exits. Fails OPEN (a data hiccup
+# never blocks trading). The high-water mark anchors at current equity on first
+# run (re-baseline to "now"); delete drawdown_state.json to re-anchor later.
+DRAWDOWN_GOVERNOR     = True     # master switch
+DD_DERISK_HALF_PCT    = 0.06     # >= 6% off peak  → half-size new entries
+DD_DERISK_QUARTER_PCT = 0.10     # >= 10% off peak → quarter-size new entries
+DD_HALT_PCT           = 0.13     # >= 13% off peak → stop opening new positions
+WEEKLY_LOSS_LIMIT_PCT = 0.08     # rolling N-day loss → stop opening new positions
+WEEKLY_LOOKBACK_DAYS  = 5        # trading days in the rolling window
+DRAWDOWN_STATE_FILE   = "drawdown_state.json"
+
 # ── Swing vs Day position budgets ──────────────────────────────────────────────
 # Swing and day trades get SEPARATE position caps so a full swing book (multi-day
 # catalyst calls / IV-rank spreads) can never use up the slots the intraday
@@ -745,6 +762,125 @@ def _bear_throttle(strategy: str | None, equity: float = 0.0) -> tuple[float, fl
     return BEAR_SIZE_MULT, BEAR_POSITION_MULT, reject
 
 
+# ─── Drawdown governor ───────────────────────────────────────────────────────────
+
+def load_drawdown_state() -> dict:
+    if not os.path.exists(DRAWDOWN_STATE_FILE):
+        return {}
+    try:
+        with open(DRAWDOWN_STATE_FILE) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def update_high_water_mark(equity: float) -> float:
+    """
+    Ratchet the persisted high-water mark up to `equity` and return the current
+    HWM. The first-ever call anchors the HWM at the current equity — so the
+    governor measures drawdown from NOW, not from any historical peak. Delete
+    drawdown_state.json to re-anchor.
+    """
+    if equity <= 0:
+        return float(load_drawdown_state().get("hwm", 0) or 0)
+    with file_lock(DRAWDOWN_STATE_FILE):
+        st  = load_drawdown_state()
+        hwm = float(st.get("hwm", 0) or 0)
+        if equity > hwm:                       # new peak (also covers first run)
+            st["hwm"]      = round(equity, 2)
+            st["hwm_date"] = today_est().isoformat()
+            st.setdefault("anchored_at", today_est().isoformat())
+            atomic_write_json(DRAWDOWN_STATE_FILE, st)
+            hwm = st["hwm"]
+    return hwm
+
+
+def _rolling_pnl_pct(days: int = WEEKLY_LOOKBACK_DAYS) -> float | None:
+    """
+    Trailing P&L over the last `days` trading days as a fraction (e.g. -0.08),
+    using each day's CLOSING equity (last snapshot of the day). None if there
+    isn't enough history. Lazy import avoids an equity_tracker import cycle.
+    """
+    try:
+        from equity_tracker import load_equity_curve
+        curve = load_equity_curve()
+    except Exception:
+        return None
+    closes: dict[str, float] = {}
+    for r in curve:
+        d = r.get("date")
+        e = float(r.get("equity", 0) or 0)
+        if d and e > 0:
+            closes[d] = e                      # last snapshot of each day wins
+    series = [closes[d] for d in sorted(closes)]
+    if len(series) < days + 1:
+        return None
+    past = series[-(days + 1)]
+    if past <= 0:
+        return None
+    return (series[-1] - past) / past
+
+
+def drawdown_governor(equity: float) -> tuple[float, str | None]:
+    """
+    Profit-protection layer. Returns (size_mult, reject_reason):
+      • size_mult < 1.0   → de-risk new entries (graduated)
+      • reject_reason set  → stop opening new positions entirely
+
+    Measures drawdown from the high-water mark (ratcheted on every call) and the
+    rolling weekly P&L. Existing positions are untouched — they ride to their own
+    exits. Fails OPEN: any error returns (1.0, None) so a data hiccup never
+    blocks trading.
+    """
+    if not DRAWDOWN_GOVERNOR or equity <= 0:
+        return 1.0, None
+    try:
+        hwm = update_high_water_mark(equity)
+        if hwm <= 0:
+            return 1.0, None
+        dd = (equity - hwm) / hwm              # <= 0
+
+        # Hard stops first.
+        if dd <= -DD_HALT_PCT:
+            return 0.0, (f"Drawdown halt — down {abs(dd) * 100:.1f}% from peak "
+                         f"${hwm:,.0f} (limit {DD_HALT_PCT * 100:.0f}%)")
+        weekly = _rolling_pnl_pct()
+        if weekly is not None and weekly <= -WEEKLY_LOSS_LIMIT_PCT:
+            return 0.0, (f"Weekly loss limit — down {abs(weekly) * 100:.1f}% over "
+                         f"{WEEKLY_LOOKBACK_DAYS} trading days "
+                         f"(limit {WEEKLY_LOSS_LIMIT_PCT * 100:.0f}%)")
+
+        # Graduated de-risk.
+        if dd <= -DD_DERISK_QUARTER_PCT:
+            return 0.25, None
+        if dd <= -DD_DERISK_HALF_PCT:
+            return 0.50, None
+        return 1.0, None
+    except Exception:
+        return 1.0, None
+
+
+def drawdown_status(equity: float) -> dict:
+    """Snapshot of the governor state for the dashboard / logs.
+
+    Runs the governor FIRST so the high-water mark is anchored/ratcheted before
+    we read it back (otherwise the very first call would report hwm=0).
+    """
+    mult, reject = drawdown_governor(equity)
+    hwm    = float(load_drawdown_state().get("hwm", 0) or 0)
+    dd_pct = round((equity - hwm) / hwm * 100, 2) if hwm > 0 and equity > 0 else 0.0
+    weekly = _rolling_pnl_pct()
+    return {
+        "hwm":          round(hwm, 2),
+        "drawdown_pct": dd_pct,
+        "weekly_pct":   round(weekly * 100, 2) if weekly is not None else None,
+        "size_mult":    mult,
+        "halted":       reject is not None,
+        "reason":       reject,
+    }
+
+
 def _iv_mult_from_ctx(strategy: str | None, ctx: dict | None) -> float:
     """
     PURE: IV-aware size multiplier for a long-premium buyer given its IV context.
@@ -838,6 +974,17 @@ def pre_trade_check(ticker: str, strategy: str | None = None) -> dict:
     if regime_reject:
         return _reject(regime_reject, equity=equity, budget=0, pnl=daily_pnl)
 
+    # Drawdown governor — protect profits from a slow multi-day bleed the daily
+    # halt misses. De-risks new entries as equity falls from its peak, then halts
+    # them past the hard limit. Bounce (bear-market offense) is exempt, same as
+    # the bear throttle, so it can still hunt capitulation in a deep drawdown.
+    if strategy in BEAR_THROTTLE_EXEMPT:
+        dd_mult, dd_reject = 1.0, None
+    else:
+        dd_mult, dd_reject = drawdown_governor(equity)
+    if dd_reject:
+        return _reject(dd_reject, equity=equity, budget=0, pnl=daily_pnl)
+
     # Max open positions — enforced PER TRADE TYPE so swing and day trades have
     # independent budgets (a full swing book doesn't block intraday day trades).
     # Caps come from the active tier (smaller accounts hold fewer positions) and
@@ -879,6 +1026,7 @@ def pre_trade_check(ticker: str, strategy: str | None = None) -> dict:
     if alloc_reject:
         return _reject(alloc_reject, equity=equity, budget=0, pnl=daily_pnl)
     budget *= size_mult   # bear-regime throttle shrinks the final budget
+    budget *= dd_mult     # drawdown governor de-risk (graduated)
 
     # IV-aware sizing — long-premium buyers trade smaller when options are rich.
     iv_mult = _iv_size_mult(strategy, ticker)
@@ -890,6 +1038,7 @@ def pre_trade_check(ticker: str, strategy: str | None = None) -> dict:
         f"Daily P&L: ${daily_pnl:,.2f} | {trade_type.capitalize()} positions: {type_count}/{type_cap}"
         + (f" | Strategy: {strategy}" if strategy else "")
         + (" | ⚠ BEAR throttle" if size_mult < 1.0 else "")
+        + (f" | ⚠ drawdown ×{dd_mult:.2f}" if dd_mult < 1.0 else "")
         + (f" | ⚠ IV-rich size ×{iv_mult:.1f}" if iv_mult < 1.0 else "")
     )
 
