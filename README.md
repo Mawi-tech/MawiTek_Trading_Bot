@@ -2,6 +2,24 @@
 
 Multi-strategy options trading bot with a live dashboard, risk management, and broker integration via Tradier.
 
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-328%20passing-brightgreen)
+![Broker](https://img.shields.io/badge/broker-Tradier-0a7cff)
+![License](https://img.shields.io/badge/license-MIT-blue)
+
+> ⚠️ **Disclaimer:** Educational / personal project. Trades against the Tradier **sandbox** (paper money) by default. Options trading carries substantial risk — nothing here is financial advice. Use at your own risk.
+
+### Highlights
+
+- **5 independent strategies run concurrently** — earnings catalyst, IV-rank premium selling (iron condors), 0-DTE intraday momentum, post-earnings drift, and a bear-regime capitulation bounce — each with its own position book, sizing, and exit logic.
+- **Backtest-driven, not vibes-driven** — every strategy is validated against historical data before going live; experiments that lost money (bidirectional HFT signals, bearish drift, earnings IV-crush condors) were tested, **rejected, and documented** rather than shipped.
+- **Production-grade safety** — real fill confirmation (no assumed mids), crash recovery via a pending-order ledger, atomic + cross-process-locked state files, an emergency kill switch, and a watchdog that detects dead *or* hung strategy processes.
+- **Layered risk engine** — per-trade and daily-loss limits, per-strategy capital allocation, day/swing position budgets, a 9-cluster correlation cap, portfolio vega cap, IV-aware sizing, and an automatic bear-market throttle.
+- **Live single-page dashboard** — equity, P&L, positions, scanner setups, multi-source news, retail social sentiment, a full decision audit log, and analytics (Sharpe, drawdown, profit factor, expectancy).
+- **328 passing tests** that run fully offline in `MOCK_MODE` (no network, no broker calls).
+
+**Stack:** Python · Tradier API · pandas/numpy · yfinance · vanilla-JS SPA dashboard · pytest
+
 > **Full technical reference:** [ARCHITECTURE.md](ARCHITECTURE.md) documents every file and every calculation (sizing, P&L, Greeks, VWAP/RSI, drift z-score, IV, sentiment, performance metrics) with the equations.
 
 ## Strategies
@@ -279,3 +297,7 @@ Configure in `.env`. Events pushed to Telegram / Discord / Email / SMS (carrier 
 - **Recovered fill** — an order filled while the bot was offline (verify exit management!)
 
 Every event also lands in `events.json` so the dashboard's Strategies tab shows a feed even when no notification channel is configured.
+
+## License
+
+Released under the [MIT License](LICENSE) — free to use, modify, and distribute with attribution.
