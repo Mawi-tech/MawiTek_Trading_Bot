@@ -12,6 +12,7 @@ credentials.json
 
 # ── Persistent state files (machine-local) ────────────────────────────────
 risk_state.json
+drawdown_state.json
 pnl_history.json
 positions.json
 open_positions.json
@@ -56,6 +57,7 @@ iv_rank_*.csv
 
 # ── Debug artifacts ──────────────────────────────────────────────────────
 emoji_scan.txt
+*.bak
 
 # ── Python build / cache ──────────────────────────────────────────────────
 __pycache__/

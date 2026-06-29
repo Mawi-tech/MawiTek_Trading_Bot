@@ -27,6 +27,7 @@ from risk_manager import (
     load_state, DAILY_LOSS_LIMIT_PCT, MAX_OPEN_POSITIONS,
     MAX_SWING_POSITIONS, MAX_DAY_POSITIONS, DAY_TRADE_MAX_DTE,
     MAX_PORTFOLIO_VEGA_PCT as VEGA_LIMIT_PCT,
+    drawdown_status,
 )
 from position_manager import load_positions, days_until_expiry
 from trade_journal import load_closed_trades
@@ -851,6 +852,15 @@ def _alert_channel_status() -> dict:
         return {}
 
 
+def _safe_drawdown_status(equity: float) -> dict | None:
+    """drawdown_status() but never lets a hiccup break the whole state write."""
+    try:
+        return drawdown_status(equity)
+    except Exception as e:
+        print(f"[Dashboard] drawdown_status failed (non-fatal): {e}")
+        return None
+
+
 def write_dashboard_state(
     setups: list[dict] | None = None,
     bot_status: str = "running",
@@ -977,6 +987,10 @@ def write_dashboard_state(
                 "max_day":         cfg["max_day_positions"] if cfg else MAX_DAY_POSITIONS,
                 "trades_today":    trades_today,
                 "halted":          halted,
+                # Drawdown governor: peak-to-current drawdown, rolling week, and
+                # whether new entries are being de-risked or halted to protect
+                # profits from a slow bleed the daily halt misses. Best-effort.
+                "drawdown":        _safe_drawdown_status(equity),
             },
             # Active tier config + presets + thresholds for the Settings form.
             "config": ({

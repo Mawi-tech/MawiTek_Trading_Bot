@@ -51,6 +51,9 @@ def _stub_checks(monkeypatch, positions=0):
     monkeypatch.setattr(rm, "concentration_reject", lambda t: None)
     monkeypatch.setattr(rm, "_strategy_budget", lambda strat, eq, b: (b, None))
     monkeypatch.setattr(rm, "count_positions_by_type", lambda tt: positions)
+    # Isolate the drawdown governor — these tests exercise the bear throttle, and
+    # the real governor would otherwise persist drawdown_state.json into the cwd.
+    monkeypatch.setattr(rm, "drawdown_governor", lambda eq: (1.0, None))
 
 
 def test_pre_trade_check_bear_halves_budget(monkeypatch):
