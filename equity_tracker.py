@@ -72,12 +72,15 @@ def calculate_unrealized_pnl() -> tuple[float, float]:
     return unrealized, market_value
 
 
-def snapshot_equity() -> dict[str, Any]:
+def snapshot_equity() -> dict[str, Any] | None:
     """
     Capture and persist one equity-curve point. Called once per scan cycle.
 
     The snapshot includes everything the Analytics tab needs to draw the
     curve, plus the components so we can debug a weird number later.
+
+    Returns None (and persists nothing) when the broker balance read is
+    unusable — see the guard below.
     """
     balances = get_account_balance()
     cash = float(balances.get("cash", 0) or 0)
@@ -85,12 +88,23 @@ def snapshot_equity() -> dict[str, Any]:
 
     unrealized, market_value = calculate_unrealized_pnl()
 
-    # Prefer the broker's total_equity when available — it's the most
-    # honest number. Otherwise reconstruct it from cash + market value.
-    if reported_equity > 0:
-        equity = reported_equity
-    else:
-        equity = cash + market_value
+    # The broker's total_equity is the only honest equity number we have.
+    # When it's missing/zero, the balance read failed (get_account_balance
+    # returns all-zeros on any API error) — and we CANNOT reconstruct it from
+    # cash + market_value, because on a margin account get_account_balance
+    # reports cash as 0. That reconstruction would record only the position
+    # cost basis and silently drop all buying power. That is exactly what
+    # poisoned the curve on 2026-06-23 (a bogus ~$13k point) and made daily
+    # P&L read +$73k off it. Skip the snapshot rather than persist garbage.
+    if reported_equity <= 0:
+        print(
+            "[EquityTracker] Skipping snapshot: broker returned no total_equity "
+            f"(cash={cash}, market_value={market_value:.2f}) — likely a failed "
+            "balance read; not persisting a corrupt equity point."
+        )
+        return None
+
+    equity = reported_equity
 
     # Import here to avoid a circular import (trade_journal → nothing fancy,
     # but we import it lazily for symmetry with risk_manager).
@@ -146,8 +160,20 @@ def get_baseline_equity_for_today() -> float | None:
     today = today_est().isoformat()
     curve = load_equity_curve()
     for record in reversed(curve):
-        if record.get("date") and record["date"] < today:
-            return float(record.get("equity", 0) or 0)
+        equity = float(record.get("equity", 0) or 0)
+        # Skip non-positive equities — those are failed-read artifacts, not a
+        # real baseline (defensive belt-and-braces alongside the write guard).
+        if record.get("date") and record["date"] < today and equity > 0:
+            return equity
+    return None
+
+
+def _last_known_equity() -> float | None:
+    """Most recent snapshot equity (any date) with a positive value, else None."""
+    for record in reversed(load_equity_curve()):
+        equity = float(record.get("equity", 0) or 0)
+        if equity > 0:
+            return equity
     return None
 
 
@@ -158,10 +184,19 @@ def get_live_equity() -> float:
     """
     balances = get_account_balance()
     reported_equity = float(balances.get("total_equity", 0) or 0)
-    cash = float(balances.get("cash", 0) or 0)
 
     if reported_equity > 0:
         return reported_equity
 
+    # Broker read unusable (see snapshot_equity). Do NOT reconstruct from
+    # cash + market_value — on a margin account cash reads as 0, so that would
+    # collapse equity to the position cost basis and could false-trip the
+    # daily-loss halt. Fall back to the last known good equity instead.
+    last = _last_known_equity()
+    if last is not None:
+        return last
+
+    # No history at all (very first cycle) → reconstruct as a last resort.
+    cash = float(balances.get("cash", 0) or 0)
     _, market_value = calculate_unrealized_pnl()
     return cash + market_value
