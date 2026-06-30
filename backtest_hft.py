@@ -192,72 +192,70 @@ SLIPPAGE_PCT        = 0.02      # 2% slippage on fill (wide spread for 0DTE)
 MIN_BARS_BETWEEN_ENTRIES = 3
 
 
-# --- Black-Scholes ATM Approximation ------------------------------------------
+# --- Black-Scholes pricing (theta-aware) --------------------------------------
+# We price the option with FULL Black-Scholes at entry and again at exit, with a
+# shrinking dte. This captures THETA (time decay) — the dominant cost of holding
+# 0-DTE options that the previous delta-gamma proxy (fixed dte, no decay)
+# ignored, which is why the old backtest overstated this strategy.
 
-def _bs_atm_delta_gamma(spot: float, iv: float, dte_days: float) -> tuple[float, float]:
-    """
-    Approximate delta and gamma for an ATM call using Black-Scholes.
-    dte_days: fractional days to expiry.
-    Returns (delta, gamma).
-    """
-    if dte_days <= 0 or iv <= 0 or spot <= 0:
-        return 0.5, 0.0
-
+def _bs_price(spot: float, strike: float, iv: float, dte_days: float,
+              kind: str = "call") -> float:
+    """Black-Scholes option price (r=0), calls and puts. Near/at expiry returns
+    intrinsic value, so a held 0-DTE option correctly decays toward intrinsic."""
+    if spot <= 0 or strike <= 0:
+        return 0.0
+    if dte_days <= 0 or iv <= 0:
+        intrinsic = (spot - strike) if kind == "call" else (strike - spot)
+        return max(0.0, intrinsic)
     t = dte_days / 365.0
     sqrt_t = math.sqrt(t)
-
-    # ATM: S ≈ K, so d1 ≈ 0.5 * iv * sqrt_t
-    d1 = 0.5 * iv * sqrt_t
-
-    # Standard normal pdf/cdf approximations
-    def _norm_pdf(x: float) -> float:
-        return math.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
-
-    delta = 0.5 + _norm_pdf(d1) * d1   # Simplified; ATM delta ≈ 0.50–0.55
-    delta = max(0.1, min(0.9, delta))
-
-    gamma = _norm_pdf(d1) / (spot * iv * sqrt_t) if (spot * iv * sqrt_t) > 0 else 0.0
-
-    return delta, gamma
+    d1 = (math.log(spot / strike) + 0.5 * iv * iv * t) / (iv * sqrt_t)
+    d2 = d1 - iv * sqrt_t
+    nd1 = 0.5 * (1 + math.erf(d1 / math.sqrt(2)))
+    nd2 = 0.5 * (1 + math.erf(d2 / math.sqrt(2)))
+    if kind == "call":
+        return max(0.0, spot * nd1 - strike * nd2)
+    # Put via parity (r=0): P = C - S + K  →  K*N(-d2) - S*N(-d1)
+    return max(0.0, strike * (1 - nd2) - spot * (1 - nd1))
 
 
-def _estimate_option_pnl(
-    entry_stock: float,
-    exit_stock: float,
-    iv: float,
-    dte_days: float,
-    direction: str,
-    quantity: int,
-    entry_mid: float,
-) -> float:
+def _interval_minutes(interval: str) -> int:
+    """Minutes per bar from a Tradier interval string ('5m','1m','15m')."""
+    try:
+        return max(1, int(str(interval).lower().rstrip("m")))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _get_intraday_yf(ticker: str, days: int, interval: str = "5m"):
     """
-    Estimate option P&L from a stock move using delta-gamma approximation.
-
-    direction: "bullish" → call, "bearish" → put.
-    entry_mid: option premium paid at entry (per share).
-    Returns total P&L in dollars (negative = loss).
+    Intraday bars via yfinance — a reliable historical source for backtests that
+    works regardless of market hours or sandbox availability (yfinance keeps ~60
+    days of 5m data). Returned with the SAME shape the Tradier path produces:
+    OHLCV columns and a tz-naive US/Eastern index, so the rest of the backtest is
+    unchanged. Returns None if nothing usable comes back.
     """
-    delta, gamma = _bs_atm_delta_gamma(entry_stock, iv, dte_days)
-
-    stock_move = exit_stock - entry_stock
-    if direction == "bearish":
-        stock_move = -stock_move   # Put profits on down moves
-
-    # Delta-gamma P&L (per share)
-    option_move = delta * stock_move + 0.5 * gamma * stock_move ** 2
-
-    # Clamp: max gain is unbounded but entry price is max loss per share
-    option_move = max(-entry_mid, option_move)
-
-    # Per contract: 100 shares
-    pnl_per_contract = option_move * 100
-    gross_pnl = pnl_per_contract * quantity
-
-    # Costs
-    commission = COMMISSION_PER_LEG * quantity * 2   # open + close
-    slippage   = entry_mid * 100 * quantity * SLIPPAGE_PCT
-
-    return round(gross_pnl - commission - slippage, 2)
+    try:
+        import yfinance as yf
+        period = f"{min(max(int(days), 1), 59)}d"      # yf caps 5m history ~60d
+        df = yf.download(ticker, period=period, interval=interval,
+                         progress=False, auto_adjust=False)
+        if df is None or df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):       # yf returns (field, ticker)
+            df.columns = [c[0] for c in df.columns]
+        # yfinance indexes intraday bars in UTC; the backtest's session gates and
+        # theta clock assume naive ET (like the Tradier feed). Convert.
+        try:
+            df.index = df.index.tz_convert("America/New_York").tz_localize(None)
+        except (TypeError, AttributeError):
+            pass
+        keep = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in df.columns]
+        df = df[keep].dropna()
+        return df if len(df) else None
+    except Exception as e:
+        print(f"[Backtest] yfinance intraday fetch failed for {ticker}: {e}")
+        return None
 
 
 def _get_hist_iv(close: pd.Series, window: int = 20) -> float:
@@ -287,18 +285,20 @@ def backtest_ticker(
 
     Returns a results dict with P&L, win rate, and trade log.
     """
-    # Pull the FULL multi-day intraday history directly from the data layer
-    # with the integer day count (the old period-string path silently capped
-    # anything beyond 5 days down to a single day).
-    df = get_intraday_bars(ticker, interval=interval, days=days)
+    # Prefer yfinance for historical intraday (reliable + market-hours-agnostic);
+    # fall back to the Tradier data layer if yfinance returns nothing.
+    df = _get_intraday_yf(ticker, days, interval)
+    if df is None or len(df) < 30:
+        df = get_intraday_bars(ticker, interval=interval, days=days)
 
-    if df.empty or len(df) < 30:
+    if df is None or df.empty or len(df) < 30:
         print(f"[Backtest] {ticker} — insufficient intraday data")
         return _empty_result(ticker)
 
     equity    = starting_capital
     trades    = []
     last_entry_bar = -MIN_BARS_BETWEEN_ENTRIES  # Allow entry from first bar
+    bar_minutes = _interval_minutes(interval)   # for theta (dte decay per bar)
 
     print(f"\n[Backtest] {ticker} | {len(df)} bars | {interval} | {days}d")
 
@@ -350,64 +350,60 @@ def backtest_ticker(
         entry_price  = float(entry_bar["Close"])
         entry_time   = df.index[i]
 
-        # Option premium: roughly 1–2% of stock for 0-DTE ATM
-        # Use a simple model: premium = 0.5% of stock price for ultra-short DTE
-        atm_premium  = entry_price * 0.005   # ~0.5% of stock
-        atm_premium  = max(0.10, atm_premium)   # Floor at $0.10
+        # Honest option pricing: full Black-Scholes revalued at entry and exit so
+        # the model sees THETA. The option's remaining life = time to the 16:00 ET
+        # close (0-DTE realism: the live strategy prefers same-day expiries).
+        kind   = "call" if direction == "bullish" else "put"
+        strike = entry_price                          # ~ATM
+        iv     = _get_hist_iv(window["Close"])
 
-        # Position sizing
-        budget           = equity * RISK_PER_TRADE_PCT
-        cost_per_contract = atm_premium * 100
+        mins_to_close  = max(bar_minutes,
+                             (16 * 60) - (entry_time.hour * 60 + entry_time.minute))
+        entry_dte_days = mins_to_close / (60.0 * 24.0)
+
+        entry_val = _bs_price(entry_price, strike, iv, entry_dte_days, kind)
+        if entry_val <= 0:
+            continue                                  # can't price → skip
+
+        # Position sizing off the REAL premium (not a 0.5%-of-stock proxy).
+        budget            = equity * RISK_PER_TRADE_PCT
+        cost_per_contract = entry_val * 100
         quantity = max(1, int(budget // cost_per_contract))
 
-        # Historical IV for delta-gamma model
-        iv = _get_hist_iv(window["Close"])
-
-        # DTE assumption: 0.5 days (0-DTE, mid-session)
-        dte_days = 0.5
-
-        # Simulate forward bars for exit
+        # Simulate forward bars; TP/SL decided on the THETA-AWARE option value
+        # (dte shrinks each bar), not a linear stock-move proxy.
+        bar_days     = bar_minutes / (60.0 * 24.0)
         exit_bar_idx = None
         exit_reason  = "time_stop"
-        exit_price   = float(df.iloc[min(i + MAX_HOLD_BARS, len(df) - 1)]["Close"])
 
         for j in range(1, MAX_HOLD_BARS + 1):
             if i + j >= len(df):
                 break
-
-            future_bar  = df.iloc[i + j]
-            future_close = float(future_bar["Close"])
-
-            # Estimate option value at this point
-            option_move_est = (
-                (future_close - entry_price) if direction == "bullish"
-                else (entry_price - future_close)
-            )
-            option_pct = option_move_est / (entry_price * 0.005) if entry_price * 0.005 > 0 else 0
+            future_close = float(df.iloc[i + j]["Close"])
+            dte_j  = max(1e-6, entry_dte_days - j * bar_days)
+            val_j  = _bs_price(future_close, strike, iv, dte_j, kind)
+            option_pct = (val_j - entry_val) / entry_val
 
             if option_pct >= TAKE_PROFIT_PCT:
-                exit_price   = future_close
                 exit_bar_idx = i + j
                 exit_reason  = "take_profit"
                 break
-
             if option_pct <= -STOP_LOSS_PCT:
-                exit_price   = future_close
                 exit_bar_idx = i + j
                 exit_reason  = "stop_loss"
                 break
 
-        exit_time = df.index[exit_bar_idx if exit_bar_idx else min(i + MAX_HOLD_BARS, len(df) - 1)]
+        exit_idx   = exit_bar_idx if exit_bar_idx else min(i + MAX_HOLD_BARS, len(df) - 1)
+        exit_time  = df.index[exit_idx]
+        exit_price = float(df.iloc[exit_idx]["Close"])
+        held_bars  = exit_idx - i
+        exit_dte   = max(1e-6, entry_dte_days - held_bars * bar_days)
+        exit_val   = _bs_price(exit_price, strike, iv, exit_dte, kind)
 
-        pnl = _estimate_option_pnl(
-            entry_stock=entry_price,
-            exit_stock=exit_price,
-            iv=iv,
-            dte_days=dte_days,
-            direction=direction,
-            quantity=quantity,
-            entry_mid=atm_premium,
-        )
+        gross_pnl  = (exit_val - entry_val) * 100 * quantity
+        commission = COMMISSION_PER_LEG * quantity * 2          # open + close
+        slippage   = entry_val * 100 * quantity * SLIPPAGE_PCT
+        pnl = round(gross_pnl - commission - slippage, 2)
 
         equity = max(0, equity + pnl)
         last_entry_bar = i
