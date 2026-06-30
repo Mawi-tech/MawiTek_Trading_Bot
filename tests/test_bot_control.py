@@ -94,3 +94,10 @@ def test_retired_strategy_blocks_new_entries(monkeypatch):
     _stub(monkeypatch)
     res = rm.pre_trade_check("AAPL", strategy="catalyst_long_call")
     assert not res["approved"] and "retired" in res["reason"].lower()
+
+
+def test_paused_strategy_blocks_new_entries(monkeypatch):
+    # HFT is paused pending theta-honest revalidation — no new entries.
+    _stub(monkeypatch)
+    res = rm.pre_trade_check("AAPL", strategy="hft_intraday")
+    assert not res["approved"] and "paused" in res["reason"].lower()
