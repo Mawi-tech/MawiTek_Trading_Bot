@@ -44,12 +44,11 @@ def test_entry_limit_falls_back_to_mid_without_ask():
 
 
 def test_confluence_floor_present():
-    # Jun 10 2026: floor lowered 3→2 by user decision — at 3 the scanner found
-    # ~1 setup/day and the bot effectively never day-traded. The rails that
-    # make 2 acceptable: relaxed-conviction setups trade at HALF size, the
-    # stop is tight (-20%), and the daily-loss halt caps the damage. A floor
-    # must still exist (single-signal setups were never profitable).
-    assert 2 <= hs.HFT_MIN_CONFLUENCE <= 3
+    # Jun 30 2026: floor restored to 3 after a theta-honest, two-sample backtest
+    # showed 2 is OVERFIT (positive on mega-caps, negative on a broad basket),
+    # while 3 is positive on BOTH. Lock >=3 so a future "frequency push" can't
+    # silently revert to the unreliable loose-trigger config.
+    assert 3 <= hs.HFT_MIN_CONFLUENCE <= 5
 
 
 def test_backtest_mirrors_executor_exits():
