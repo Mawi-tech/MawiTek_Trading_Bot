@@ -75,7 +75,7 @@ def _stub(monkeypatch):
 def test_manual_halt_blocks_pre_trade_check(monkeypatch):
     _stub(monkeypatch)
     bc.halt("manual")
-    res = rm.pre_trade_check("AAPL", strategy="catalyst_long_call")
+    res = rm.pre_trade_check("AAPL", strategy="pead")
     assert not res["approved"] and "halt" in res["reason"].lower()
 
 
@@ -84,5 +84,13 @@ def test_paused_strategy_blocks_only_itself(monkeypatch):
     bc.pause_strategy("hft_intraday")
     blocked = rm.pre_trade_check("AAPL", strategy="hft_intraday")
     assert not blocked["approved"] and "paused" in blocked["reason"].lower()
-    ok = rm.pre_trade_check("AAPL", strategy="catalyst_long_call")
+    ok = rm.pre_trade_check("AAPL", strategy="pead")
     assert ok["approved"]
+
+
+def test_retired_strategy_blocks_new_entries(monkeypatch):
+    # Catalyst is retired (negative-EV) — pre_trade_check must refuse new entries
+    # even though everything else (slots, equity, regime) is fine.
+    _stub(monkeypatch)
+    res = rm.pre_trade_check("AAPL", strategy="catalyst_long_call")
+    assert not res["approved"] and "retired" in res["reason"].lower()

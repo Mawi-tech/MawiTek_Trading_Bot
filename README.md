@@ -26,7 +26,7 @@ Multi-strategy options trading bot with a live dashboard, risk management, and b
 
 | # | Strategy | File | Description |
 |---|---|---|---|
-| 1 | **Catalyst Long Call** | `executor.py` | Swing trades on earnings/news catalysts. 7–30 DTE long calls. |
+| 1 | **Catalyst Long Call** ⚠️ _retired_ | `executor.py` | Swing long calls into earnings (7–30 DTE). **Retired (negative-EV):** buying long premium into an event pays for IV crush — the backtest is ~32% win / negative P&L. New entries are disabled; the engine still exits any open positions. Its edge is captured better by Strategy 4 (post-earnings drift) and Strategy 2 (selling the crush). |
 | 2 | **IV-Rank Premium** | `iv_rank_bot.py` | High IV → sell premium (iron condors, falls back to bull-put spreads); low IV → buy premium (long straddles). Fully exit-managed. |
 | 3 | **HFT Intraday** | `hft_executor.py` | 0–1 DTE momentum scalps. Triggers: VWAP reclaim, ORB breakout, volume spike, range breakout, VWAP bounce, strong bar. Conviction-tiered and sized accordingly. |
 | 4 | **PEAD / News Drift** | `pead_executor.py` | Post-earnings / news-driven gap drift. ATM 14–35 DTE long calls/puts on a confirmed daily-bar gap. Long-only (regime-gated shorts were tested and rejected). |
@@ -177,7 +177,7 @@ python dashboard_server.py
 | Max swing positions | 8 (catalyst + iv_rank + pead + bounce) | `risk_manager.py` → `MAX_SWING_POSITIONS` |
 | Max day positions | 5 (hft intraday) | `risk_manager.py` → `MAX_DAY_POSITIONS` |
 | Max total positions | 13 (swing + day) | `risk_manager.py` → `MAX_OPEN_POSITIONS` |
-| Per-strategy capital cap | catalyst 40 / iv-rank 25 / hft 20 / pead 15 / bounce 15 (% of equity) | `risk_manager.py` → `STRATEGY_ALLOCATION_PCT` |
+| Per-strategy capital cap | iv-rank 35 / pead 35 / hft 25 / bounce 15 (% of equity); catalyst **retired** | `risk_manager.py` → `STRATEGY_ALLOCATION_PCT`, `RETIRED_STRATEGIES` |
 | Correlation cluster cap | ≤3 concurrent positions in any of 9 clusters (megacap_growth, index, semis, software, crypto, financials, energy, healthcare, consumer) | `risk_manager.py` → `MAX_POSITIONS_PER_GROUP` |
 | Bear-regime throttle | half size, ~40% fewer slots when SPY < 200d SMA; bounce strategy is exempt | `risk_manager.py` → `BEAR_REGIME_THROTTLE` |
 | IV-aware sizing | de-size long-premium buyers 0.6× when IV is rich / 0.4× very rich (rank ≥85 or IV/HV ≥1.6) | `risk_manager.py` → `IV_AWARE_SIZING` |

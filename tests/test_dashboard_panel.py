@@ -45,7 +45,7 @@ def test_build_strategy_panel(tmp_path, monkeypatch):
     assert by["hft_intraday"]["positions"] == 2
     assert by["pead"]["positions"] == 1
     assert by["bounce"]["positions"] == 0
-    assert by["catalyst_long_call"]["usage_pct"] == 10      # 4k of 40k (40% of 100k)
+    assert by["catalyst_long_call"]["usage_pct"] == 0       # retired → 0% allocation (cap 0)
     assert by["catalyst_long_call"]["win_rate"] == 50       # 1 of 2 wins
     assert by["catalyst_long_call"]["pnl"] == 60            # 100 - 40
 

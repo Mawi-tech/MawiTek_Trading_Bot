@@ -191,13 +191,23 @@ def classify_trade_type(strategy: str | None, dte: int | None = None) -> str:
 # one strategy from hogging buying power so the others can't trade. A strategy
 # not listed here is uncapped (only the global checks apply). Total can exceed
 # 1.0 since not every strategy is fully deployed simultaneously.
+# NOTE: catalyst_long_call is RETIRED (see RETIRED_STRATEGIES below) — its old
+# 40% was reallocated, favoring PEAD (its positive-EV post-earnings successor).
 STRATEGY_ALLOCATION_PCT = {
-    "catalyst_long_call": 0.40,   # swing catalyst book
-    "iv_rank":            0.25,   # premium / spreads
-    "hft_intraday":       0.20,   # intraday 0-DTE
-    "pead":               0.15,   # post-earnings / news drift (swing)
+    "iv_rank":            0.35,   # premium / spreads (most robust backtest)
+    "hft_intraday":       0.25,   # intraday 0-DTE
+    "pead":               0.35,   # post-earnings / news drift (swing) — best validated (+158%)
     "bounce":             0.15,   # bear-regime capitulation bounce (only deploys in bear)
 }
+
+# Strategies the bot will NOT open NEW positions in, regardless of tier/config.
+# It still MONITORS and EXITS any open positions (retiring ≠ orphaning). This is
+# the bot's own verdict made authoritative: buying long calls into earnings is
+# negative-EV by construction (you pay for IV crush) — the catalyst backtest is
+# ~32% win / negative total P&L across 2yr, and its better-EV variants already
+# exist as live strategies (PEAD harvests the post-earnings drift; iv_rank sells
+# the crush). Enforced even when the tier config is unavailable.
+RETIRED_STRATEGIES = {"catalyst_long_call"}
 
 # State file to persist daily P&L across restarts
 STATE_FILE      = "risk_state.json"
@@ -946,6 +956,14 @@ def pre_trade_check(ticker: str, strategy: str | None = None) -> dict:
         control_reject = None
     if control_reject:
         return _reject(control_reject, equity=equity, budget=0, pnl=0)
+
+    # Retired strategy — no NEW entries (exits still run via the monitor loops).
+    # Enforced here so it holds even when the tier config can't be read.
+    if strategy in RETIRED_STRATEGIES:
+        return _reject(
+            f"{strategy} is retired (negative-EV) — new entries disabled",
+            equity=equity, budget=0, pnl=0,
+        )
 
     # Account-size-aware tier config (tiers + dashboard overrides). None → the
     # module-constant fallback path, which behaves exactly like the standard tier.

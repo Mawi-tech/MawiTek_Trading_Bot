@@ -47,7 +47,8 @@ def test_standard_tier_equals_risk_manager_constants():
     assert s["max_swing_positions"]   == rm.MAX_SWING_POSITIONS
     assert s["max_day_positions"]     == rm.MAX_DAY_POSITIONS
     assert s["strategy_allocation_pct"] == rm.STRATEGY_ALLOCATION_PCT
-    assert set(s["enabled_strategies"]) == set(uc.KNOWN_STRATEGIES)
+    # All KNOWN_STRATEGIES are enabled EXCEPT the retired ones (catalyst_long_call).
+    assert set(s["enabled_strategies"]) == set(uc.KNOWN_STRATEGIES) - rm.RETIRED_STRATEGIES
 
 
 def test_effective_config_no_file_is_auto_and_matches_constants():
@@ -174,8 +175,8 @@ def test_pre_trade_check_swing_cap_follows_tier(monkeypatch):
 def test_pre_trade_check_standard_account_unchanged(monkeypatch):
     # The whole point: a big account behaves exactly as before (8 swing slots).
     _stub_checks(monkeypatch, equity=100_000, positions=4)
-    res = rm.pre_trade_check("AAPL", strategy="catalyst_long_call")
-    assert res["approved"]                                 # catalyst enabled, slots free
+    res = rm.pre_trade_check("AAPL", strategy="pead")
+    assert res["approved"]                                 # active strategy, slots free
 
 
 def test_is_strategy_enabled_helper():
