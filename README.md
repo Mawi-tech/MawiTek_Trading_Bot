@@ -20,6 +20,8 @@ Multi-strategy options trading bot with a live dashboard, risk management, and b
 
 **Stack:** Python · Tradier API · pandas/numpy · yfinance · vanilla-JS SPA dashboard · pytest
 
+> **New to the terminology?** [docs/GLOSSARY.md](docs/GLOSSARY.md) explains every scanner signal, score, and data source in plain English.
+
 > **Full technical reference:** [ARCHITECTURE.md](docs/ARCHITECTURE.md) documents every file and every calculation (sizing, P&L, Greeks, VWAP/RSI, drift z-score, IV, sentiment, performance metrics) with the equations.
 
 ## Strategies
