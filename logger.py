@@ -55,6 +55,61 @@ _FMT = logging.Formatter(
 )
 
 
+# ── Secret redaction (defense in depth) ──────────────────────────────────────
+# Nothing in the codebase deliberately logs a credential, but a stray exception
+# string (e.g. a urllib error echoing the Telegram bot-token URL) or a future
+# edit could. This filter scrubs every known secret VALUE out of every log
+# record before it reaches a file or the console — so a leak is impossible by
+# construction, not just by convention.
+#
+# Secrets are read LAZILY from the environment on each record (see below), so we
+# deliberately DON'T load .env here — that would have global import side effects
+# (and break tests that expect a clean env). By the time anything logs, the
+# bot's entry points have imported tradier_client, which loads .env.
+
+# Env vars whose VALUES must never appear in a log line.
+_SECRET_ENV_VARS = (
+    "TRADIER_API_KEY", "TRADIER_ACCOUNT_ID", "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID", "DISCORD_WEBHOOK_URL", "SMTP_PASSWORD", "SMTP_USER",
+    "UNUSUAL_WHALES_API_KEY", "DASH_AUTH_PASS",
+)
+
+
+def _collect_secrets() -> list[str]:
+    """Current secret values (len >= 6 so we never redact trivial strings)."""
+    out = []
+    for k in _SECRET_ENV_VARS:
+        v = (os.getenv(k) or "").strip()
+        if len(v) >= 6:
+            out.append(v)
+    # Longest first so a token that contains a shorter one is redacted whole.
+    return sorted(set(out), key=len, reverse=True)
+
+
+class _SecretRedactor(logging.Filter):
+    """Replace any known secret value in the rendered message with a marker."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        secrets = _collect_secrets()          # re-read each time → robust to late .env loads
+        if not secrets:
+            return True
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        red = msg
+        for s in secrets:
+            if s in red:
+                red = red.replace(s, "***REDACTED***")
+        if red != msg:
+            record.msg = red
+            record.args = ()                  # message already fully rendered
+        return True
+
+
+_REDACTOR = _SecretRedactor()
+
+
 def get_logger(name: str, level: int = logging.DEBUG) -> logging.Logger:
     """
     Return a named logger that writes to both console (INFO+) and a
@@ -79,11 +134,13 @@ def get_logger(name: str, level: int = logging.DEBUG) -> logging.Logger:
     )
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(_FMT)
+    fh.addFilter(_REDACTOR)        # scrub secrets before they hit disk
 
     # ── Console handler (INFO and above only) ─────────────────────────
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
     ch.setFormatter(_FMT)
+    ch.addFilter(_REDACTOR)        # ...and before they hit the console
 
     logger.addHandler(fh)
     logger.addHandler(ch)
