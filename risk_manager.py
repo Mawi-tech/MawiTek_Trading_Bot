@@ -1078,7 +1078,10 @@ def reconcile_positions_from_broker() -> int:
     from position_manager import load_positions, remove_position
 
     try:
-        broker_pos    = get_open_positions()
+        # strict=True → a failed broker read raises instead of returning [],
+        # so a transient outage can't make us journal every open position as
+        # closed_externally and orphan it from exit management.
+        broker_pos    = get_open_positions(strict=True)
         broker_syms   = {p.get("symbol") for p in broker_pos if p.get("symbol")}
         local_pos     = load_positions()
     except Exception as e:
