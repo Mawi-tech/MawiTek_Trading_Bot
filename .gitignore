@@ -14,6 +14,7 @@ credentials.json
 risk_state.json
 drawdown_state.json
 pnl_history.json
+public_feed.json
 positions.json
 open_positions.json
 dashboard_state.json
