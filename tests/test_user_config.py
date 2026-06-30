@@ -47,8 +47,9 @@ def test_standard_tier_equals_risk_manager_constants():
     assert s["max_swing_positions"]   == rm.MAX_SWING_POSITIONS
     assert s["max_day_positions"]     == rm.MAX_DAY_POSITIONS
     assert s["strategy_allocation_pct"] == rm.STRATEGY_ALLOCATION_PCT
-    # All KNOWN_STRATEGIES are enabled EXCEPT the retired ones (catalyst_long_call).
-    assert set(s["enabled_strategies"]) == set(uc.KNOWN_STRATEGIES) - rm.RETIRED_STRATEGIES
+    # All KNOWN_STRATEGIES are enabled EXCEPT retired (catalyst) and paused (hft).
+    assert (set(s["enabled_strategies"])
+            == set(uc.KNOWN_STRATEGIES) - rm.RETIRED_STRATEGIES - rm.PAUSED_STRATEGIES)
 
 
 def test_effective_config_no_file_is_auto_and_matches_constants():
@@ -150,12 +151,14 @@ def _stub_checks(monkeypatch, equity, positions=0):
 
 
 def test_pre_trade_check_rejects_disabled_strategy(monkeypatch):
-    # Day-trading (hft) is disabled on a small account (PDT rule).
-    _stub_checks(monkeypatch, equity=8_000)
-    res = rm.pre_trade_check("AAPL", strategy="hft_intraday")
+    # bounce is enabled at standard/small but disabled on a micro account (<$5k).
+    # (Uses bounce rather than hft, which is now globally PAUSED and blocked
+    # earlier — this keeps the test focused on the per-TIER enable mechanism.)
+    _stub_checks(monkeypatch, equity=3_000)
+    res = rm.pre_trade_check("AAPL", strategy="bounce")
     assert not res["approved"]
     assert "disabled" in res["reason"]
-    assert "small" in res["reason"]
+    assert "micro" in res["reason"]
 
 
 def test_pre_trade_check_allows_enabled_strategy(monkeypatch):
@@ -180,8 +183,9 @@ def test_pre_trade_check_standard_account_unchanged(monkeypatch):
 
 
 def test_is_strategy_enabled_helper():
-    assert uc.is_strategy_enabled("hft_intraday", 100_000) is True
-    assert uc.is_strategy_enabled("hft_intraday", 8_000) is False
+    assert uc.is_strategy_enabled("iv_rank", 100_000) is True       # active swing engine
+    assert uc.is_strategy_enabled("hft_intraday", 100_000) is False # PAUSED pending revalidation
+    assert uc.is_strategy_enabled("hft_intraday", 8_000) is False   # also PDT-disabled below 25k
     assert uc.is_strategy_enabled(None, 8_000) is True     # no strategy → always ok
 
 
