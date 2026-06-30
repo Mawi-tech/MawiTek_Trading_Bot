@@ -147,7 +147,10 @@ def reconcile_hft_positions() -> int:
         return 0
 
     try:
-        broker_pos  = get_open_positions()
+        # strict=True → a failed broker read raises instead of returning [],
+        # so a transient outage can't make us journal every open position as
+        # closed_externally and orphan it from exit management.
+        broker_pos  = get_open_positions(strict=True)
         broker_syms = {p.get("symbol") for p in broker_pos if p.get("symbol")}
     except Exception as e:
         log.warning("reconcile_hft_positions: could not query broker: %s", e)

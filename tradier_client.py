@@ -71,12 +71,33 @@ HEADERS = {
 MOCK_EQUITY = 10_000.0
 
 
+class BrokerReadError(Exception):
+    """
+    A broker read genuinely FAILED (network / HTTP / parse / empty-where-
+    impossible), as opposed to succeeding with a legitimately empty result.
+
+    Most read helpers return a safe default ([] / 0) on error so display and
+    counting callers degrade gracefully. But some callers MUST NOT act on a
+    false "empty" — e.g. position reconciliation, which would journal every
+    open position as "closed_externally" and stop managing it if a transient
+    failure looked like "no positions". Those callers pass strict=True and
+    catch this exception to bail out (no-op) instead. See the 2026-06 incident
+    where a failed balance read poisoned the equity curve.
+    """
+
+
 # ─── Account ───────────────────────────────────────────────────────────────────
 
-def get_account_balance() -> dict:
+def get_account_balance(strict: bool = False) -> dict:
     """
     Returns account balances including total equity, cash, and option
     buying power. In MOCK_MODE returns a flat $10K account.
+
+    strict=False (default): returns all-zeros on a failed read (back-compat;
+      callers already guard equity <= 0 by failing closed).
+    strict=True: raises BrokerReadError on a failed read OR a parsed-but-
+      unusable response (total_equity <= 0). Use when a wrong equity number
+      would corrupt persisted state (equity curve, daily-P&L baseline).
     """
     if MOCK_MODE:
         return {
@@ -92,7 +113,7 @@ def get_account_balance() -> dict:
         data = r.json()
         balances = data.get("balances", {})
 
-        return {
+        result = {
             "total_equity":       float(balances.get("total_equity", 0)),
             "option_buying_power": float(balances.get("option_short_value", 0)
                                          or balances.get("net_value", 0)),
@@ -100,7 +121,17 @@ def get_account_balance() -> dict:
         }
     except Exception as e:
         print(f"[Tradier] Error fetching balance: {e}")
+        if strict:
+            raise BrokerReadError(f"balance read failed: {e}") from e
         return {"total_equity": 0, "option_buying_power": 0, "cash": 0}
+
+    # A 200 that parses but reports no equity is still unusable (a partial /
+    # malformed balances payload). Treat it as a failed read in strict mode.
+    if strict and result["total_equity"] <= 0:
+        raise BrokerReadError(
+            f"balance read returned unusable total_equity={result['total_equity']}"
+        )
+    return result
 
 
 def _safe_inner(container, outer_key: str, inner_key: str) -> list:
@@ -122,8 +153,18 @@ def _safe_inner(container, outer_key: str, inner_key: str) -> list:
     return []
 
 
-def get_open_positions() -> list[dict]:
-    """All current open positions. In MOCK_MODE returns []."""
+def get_open_positions(strict: bool = False) -> list[dict]:
+    """
+    All current open positions. In MOCK_MODE returns [].
+
+    strict=False (default): returns [] on a failed read (back-compat; safe for
+      display / counting callers that self-correct on the next cycle).
+    strict=True: raises BrokerReadError on a failed read, so reconciliation
+      never mistakes a transient API failure for "no positions" and journals
+      every still-open position as closed_externally. A genuinely-empty
+      response (account really holds nothing) still returns [] — only a
+      failure raises.
+    """
     if MOCK_MODE:
         return []
 
@@ -134,6 +175,8 @@ def get_open_positions() -> list[dict]:
         return _safe_inner(r.json(), "positions", "position")
     except Exception as e:
         print(f"[Tradier] Error fetching positions: {e}")
+        if strict:
+            raise BrokerReadError(f"positions read failed: {e}") from e
         return []
 
 

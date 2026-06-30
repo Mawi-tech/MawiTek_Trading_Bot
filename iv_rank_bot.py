@@ -1149,7 +1149,10 @@ def reconcile_iv_positions() -> int:
     if MOCK_MODE:
         return 0
     try:
-        broker_syms = {p.get("symbol") for p in get_open_positions() if p.get("symbol")}
+        # strict=True → a failed broker read raises instead of returning [],
+        # so a transient outage can't make us journal every open spread as
+        # closed_externally and orphan it from exit management.
+        broker_syms = {p.get("symbol") for p in get_open_positions(strict=True) if p.get("symbol")}
     except Exception as e:
         print(f"[IVRank] reconcile: could not query broker: {e}")
         return 0
