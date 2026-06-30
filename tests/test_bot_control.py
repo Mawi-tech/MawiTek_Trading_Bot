@@ -97,7 +97,9 @@ def test_retired_strategy_blocks_new_entries(monkeypatch):
 
 
 def test_paused_strategy_blocks_new_entries(monkeypatch):
-    # HFT is paused pending theta-honest revalidation — no new entries.
+    # The PAUSED_STRATEGIES mechanism blocks new entries (no strategy is paused
+    # by default now, so monkeypatch one in to exercise the guard).
     _stub(monkeypatch)
-    res = rm.pre_trade_check("AAPL", strategy="hft_intraday")
+    monkeypatch.setattr(rm, "PAUSED_STRATEGIES", {"iv_rank"})
+    res = rm.pre_trade_check("AAPL", strategy="iv_rank")
     assert not res["approved"] and "paused" in res["reason"].lower()

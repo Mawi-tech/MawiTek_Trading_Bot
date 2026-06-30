@@ -210,12 +210,11 @@ STRATEGY_ALLOCATION_PCT = {
 RETIRED_STRATEGIES = {"catalyst_long_call"}
 
 # Strategies PAUSED pending revalidation — like retired (no new entries; exits
-# still run), but TEMPORARY and reversible. hft_intraday is paused because its
-# live results are negative (15% win, ~-$1.9k) and its backtest is theta-blind
-# (delta-gamma only, no time decay), so its edge on 0-DTE options is unproven.
-# Re-enable ONLY after backtest_hft models theta and a config validates positive.
-# To un-pause: remove from this set AND add back to the tier enabled_strategies.
-PAUSED_STRATEGIES = {"hft_intraday"}
+# still run), but TEMPORARY and reversible. Empty now: hft_intraday was paused
+# 2026-06-30, then RE-ENABLED after the theta-honest backtest validated the
+# tighter 3/50 config on two independent samples (mega +$747 / broad +$238).
+# The mechanism is kept for future use — add a strategy key here to pause it.
+PAUSED_STRATEGIES: set[str] = set()
 
 # State file to persist daily P&L across restarts
 STATE_FILE      = "risk_state.json"
