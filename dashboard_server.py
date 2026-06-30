@@ -82,6 +82,14 @@ _ALLOWED_EXTS = {".html", ".css", ".js", ".ico", ".png", ".svg", ".woff", ".woff
 # news_feed.json / social_sentiment.json are fetched directly by the News and
 # Social tabs (their own fast polls, so a headline or sentiment update doesn't
 # wait for the next dashboard_state write).
+#
+# ⚠️ OWNER-PRIVATE SURFACE — DO NOT EXPOSE TO SUBSCRIBERS.
+# dashboard_state.json contains the owner's equity, dollar P&L, position SIZES,
+# and drawdown $ — this server is for the owner only (loopback / Tailscale, with
+# optional Basic auth). For a multi-user SIGNAL SERVICE, subscribers get the
+# SANITIZED, account-agnostic feed from signal_publisher.py (public_feed.json,
+# percentages only) served by a SEPARATE public app — never this server, and
+# public_feed.json is deliberately NOT in this allowlist.
 _ALLOWED_JSON = {"dashboard_state.json", "backtest_equity.json",
                  "news_feed.json", "social_sentiment.json"}
 
