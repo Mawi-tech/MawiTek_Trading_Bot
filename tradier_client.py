@@ -325,6 +325,56 @@ def get_quotes(symbols: list[str]) -> dict[str, float]:
     return out
 
 
+def get_quote_details(symbols: list[str]) -> dict[str, dict]:
+    """
+    Rich quote info for MANY stocks in one call: company name, last price, $ and
+    % change, volume, and 52-week range. Returns {symbol: {...}}; unpriceable
+    symbols are omitted. MOCK_MODE returns {}. Chunked like get_quotes().
+
+    Each value: {name, last, change, change_pct, volume, week_52_high, week_52_low}.
+    """
+    out: dict[str, dict] = {}
+    if MOCK_MODE or not symbols:
+        return out
+
+    def _num(v):
+        if v in (None, "", "0", 0):
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    url = f"{BASE_URL}/markets/quotes"
+    CHUNK = 100
+    for i in range(0, len(symbols), CHUNK):
+        batch = symbols[i:i + CHUNK]
+        try:
+            r = requests.get(url, headers=HEADERS,
+                             params={"symbols": ",".join(batch)}, timeout=10)
+            r.raise_for_status()
+            quotes = r.json().get("quotes", {}).get("quote", [])
+            if isinstance(quotes, dict):
+                quotes = [quotes]
+            for q in quotes:
+                sym = q.get("symbol")
+                if not sym:
+                    continue
+                last = _num(q.get("last")) or _num(q.get("close")) or _num(q.get("prevclose"))
+                out[sym] = {
+                    "name":         q.get("description") or sym,
+                    "last":         last,
+                    "change":       _num(q.get("change")),
+                    "change_pct":   _num(q.get("change_percentage")),
+                    "volume":       _num(q.get("volume")),
+                    "week_52_high": _num(q.get("week_52_high")),
+                    "week_52_low":  _num(q.get("week_52_low")),
+                }
+        except Exception as e:
+            print(f"[Tradier] Error fetching quote details batch: {e}")
+    return out
+
+
 def get_chain_greeks(underlying: str, expiration: str) -> dict[str, dict]:
     """
     Per-contract greeks for a whole expiration, keyed by OCC option symbol.
