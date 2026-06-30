@@ -77,10 +77,10 @@ TIER_PRESETS: dict[str, dict] = {
         "daily_loss_limit_pct":  0.05,
         "max_swing_positions":   8,
         "max_day_positions":     5,
-        # catalyst_long_call retired (negative-EV); hft_intraday PAUSED pending a
-        # theta-honest backtest (its 0-DTE edge is unproven). Both still exit open
-        # positions — they just can't open new ones. Mirrors risk_manager.
-        "enabled_strategies":    ["iv_rank", "pead", "bounce"],
+        # catalyst_long_call retired (negative-EV). hft_intraday is back after the
+        # theta-honest backtest validated the 3/50 config on two samples (it runs
+        # at the tighter confluence now — see hft_scanner). Mirrors risk_manager.
+        "enabled_strategies":    ["iv_rank", "hft_intraday", "pead", "bounce"],
         "strategy_allocation_pct": {
             "iv_rank":            0.35,
             "hft_intraday":       0.25,

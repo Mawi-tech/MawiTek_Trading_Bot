@@ -184,8 +184,8 @@ def test_pre_trade_check_standard_account_unchanged(monkeypatch):
 
 def test_is_strategy_enabled_helper():
     assert uc.is_strategy_enabled("iv_rank", 100_000) is True       # active swing engine
-    assert uc.is_strategy_enabled("hft_intraday", 100_000) is False # PAUSED pending revalidation
-    assert uc.is_strategy_enabled("hft_intraday", 8_000) is False   # also PDT-disabled below 25k
+    assert uc.is_strategy_enabled("hft_intraday", 100_000) is True  # re-enabled (validated 3/50)
+    assert uc.is_strategy_enabled("hft_intraday", 8_000) is False   # still PDT-disabled below 25k
     assert uc.is_strategy_enabled(None, 8_000) is True     # no strategy → always ok
 
 
