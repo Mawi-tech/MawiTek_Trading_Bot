@@ -25,7 +25,7 @@ def _setup(ticker, score, **kw):
 def _capture(monkeypatch):
     sent = []
     monkeypatch.setattr(en, "_dispatch",
-                        lambda subject, lines, severity="info": sent.append((subject, lines)))
+                        lambda subject, lines, severity="info", **kw: sent.append((subject, lines)))
     en._SETUP_ALERTED.clear()
     return sent
 

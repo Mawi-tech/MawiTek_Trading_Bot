@@ -94,22 +94,40 @@ def aggregate_reddit(posts: list[dict], ticker: str | None = None) -> dict:
     Summarize Reddit search results: mention VOLUME + keyword sentiment.
 
     `posts` are Reddit listing children ({"data": {...}}) or bare data dicts.
-    Returns {mentions, sentiment_sum, score(-1..1), upvotes, comments}. Pure.
+    Returns {mentions, sentiment_sum, score(-1..1), upvotes, comments, top_posts}
+    where top_posts is up to 3 highest-upvoted posts with their title, subreddit,
+    engagement, per-post sentiment, and a link. Pure.
     """
     mentions = sentiment_sum = upvotes = comments = 0
+    detailed: list[dict] = []
     for p in posts or []:
         d = p.get("data", p) if isinstance(p, dict) else {}
         title = d.get("title", "") or ""
         body = d.get("selftext", "") or ""
+        s = score_headline(f"{title} {body}")
+        ups = int(d.get("score", 0) or 0)
+        ncomm = int(d.get("num_comments", 0) or 0)
         mentions += 1
-        sentiment_sum += score_headline(f"{title} {body}")
-        upvotes += int(d.get("score", 0) or 0)
-        comments += int(d.get("num_comments", 0) or 0)
+        sentiment_sum += s
+        upvotes += ups
+        comments += ncomm
+        if title:
+            permalink = d.get("permalink", "") or ""
+            link = f"https://www.reddit.com{permalink}" if permalink else (d.get("url", "") or "")
+            detailed.append({
+                "title": title[:300],
+                "subreddit": d.get("subreddit", "") or "",
+                "ups": ups,
+                "comments": ncomm,
+                "sentiment": "bullish" if s > 0 else "bearish" if s < 0 else "neutral",
+                "url": link,
+            })
 
     # Normalize summed keyword score into ~[-1, 1] (≈2 hits/post saturates).
     score = round(max(-1.0, min(1.0, sentiment_sum / (mentions * 2))), 3) if mentions else 0.0
+    top_posts = sorted(detailed, key=lambda x: x["ups"], reverse=True)[:3]
     return {"mentions": mentions, "sentiment_sum": sentiment_sum, "score": score,
-            "upvotes": upvotes, "comments": comments}
+            "upvotes": upvotes, "comments": comments, "top_posts": top_posts}
 
 
 def combine_social(ticker: str, stocktwits: dict | None = None,
@@ -202,11 +220,35 @@ def fetch_reddit(ticker: str, limit: int = 15) -> list[dict]:
     return posts
 
 
-def social_for_ticker(ticker: str) -> dict:
-    """Full social verdict for one ticker (both sources, combined)."""
+def fetch_stock_snapshot(tickers: list[str]) -> dict[str, dict]:
+    """Per-ticker stock detail (name, price, change %, volume, 52w range) from the
+    broker, in one batched call. Fails soft to {} so social still works offline."""
+    try:
+        from tradier_client import get_quote_details
+        return get_quote_details([t.upper() for t in tickers])
+    except Exception as e:
+        log.debug("stock snapshot failed: %s", e)
+        return {}
+
+
+def _attach_stock(items: list[dict]) -> list[dict]:
+    """Attach a `stock` snapshot to each social item (batched broker lookup)."""
+    syms = [i["ticker"] for i in items if i.get("ticker")]
+    details = fetch_stock_snapshot(syms) if syms else {}
+    for i in items:
+        i["stock"] = details.get((i.get("ticker") or "").upper()) or {}
+    return items
+
+
+def social_for_ticker(ticker: str, with_stock: bool = True) -> dict:
+    """Full social verdict for one ticker (both sources, combined). When
+    `with_stock`, also attach a broker stock snapshot."""
     st = aggregate_stocktwits(fetch_stocktwits(ticker)) if ENABLE_STOCKTWITS else {}
     rd = aggregate_reddit(fetch_reddit(ticker), ticker) if ENABLE_REDDIT else {}
-    return combine_social(ticker, st, rd)
+    res = combine_social(ticker, st, rd)
+    if with_stock:
+        _attach_stock([res])
+    return res
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -229,7 +271,7 @@ def social_sweep_once(tickers: list[str] | None = None) -> list[dict]:
     fresh: list[dict] = []
     for t in tickers:
         try:
-            res = social_for_ticker(t)
+            res = social_for_ticker(t, with_stock=False)   # batch stock below
             if res.get("volume", 0) > 0:      # only store tickers with chatter
                 fresh.append(res)
         except Exception as e:
@@ -237,6 +279,9 @@ def social_sweep_once(tickers: list[str] | None = None) -> list[dict]:
 
     if not fresh:
         return []
+
+    # One batched broker call enriches every ticker with price/name/change.
+    _attach_stock(fresh)
 
     try:
         with file_lock(SOCIAL_FILE):
@@ -265,9 +310,16 @@ if __name__ == "__main__":
     if args.tickers:
         for t in args.tickers:
             r = social_for_ticker(t)
-            print(f"{r['ticker']:6s} {r['net_sentiment']:8s} "
-                  f"score={r['sentiment_score']:+.2f} vol={r['volume']}  "
-                  f"st={r.get('stocktwits')} rd={r.get('reddit')}")
+            stk = r.get("stock") or {}
+            name = stk.get("name", "")
+            price = stk.get("last")
+            chg = stk.get("change_pct")
+            head = f"{r['ticker']:6s} {r['net_sentiment']:8s} score={r['sentiment_score']:+.2f} vol={r['volume']}"
+            if price is not None:
+                head += f"  | {name} ${price:.2f}" + (f" ({chg:+.2f}%)" if chg is not None else "")
+            print(head)
+            for p in (r.get("reddit") or {}).get("top_posts", []):
+                print(f"    r/{p['subreddit']:<14} ⬆{p['ups']:<5} 💬{p['comments']:<4} {p['title'][:80]}")
     elif args.once:
         fresh = social_sweep_once()
         print(f"Social sweep complete — {len(fresh)} ticker(s) with chatter.")

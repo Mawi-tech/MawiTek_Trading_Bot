@@ -100,6 +100,10 @@ _FROM_ADDR  = os.getenv("ALERT_EMAIL_FROM",   _SMTP_USER).strip()
 _TO_ADDRS   = [a.strip() for a in os.getenv("ALERT_EMAIL_TO", "").split(",") if a.strip()]
 
 _DISCORD_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+# Optional per-Discord event-type filter. Comma-separated list of kinds to send
+# to Discord ONLY (other channels are unaffected). Empty = send everything.
+# Kinds: fill, close, halt, big_move, setup.  e.g. DISCORD_EVENT_KINDS=setup
+_DISCORD_KINDS = {k.strip() for k in os.getenv("DISCORD_EVENT_KINDS", "").split(",") if k.strip()}
 
 # SMS via the carrier's email-to-SMS gateway — reuses SMTP, no extra account.
 # Set ALERT_SMS_TO to the gateway address(es), e.g. "5551234567@vtext.com"
@@ -203,7 +207,14 @@ def _send_discord(title: str, lines: list[str], severity: str = "info") -> bool:
     }
     payload = json.dumps({"embeds": [embed]}).encode()
     req = urllib.request.Request(
-        _DISCORD_URL, data=payload, headers={"Content-Type": "application/json"}
+        _DISCORD_URL,
+        data=payload,
+        # Discord/Cloudflare reject urllib's default UA (HTTP 403, error 1010),
+        # so send an explicit User-Agent.
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "MawiTek-Bot (https://github.com/mawitek, 1.0)",
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -219,8 +230,13 @@ def _send_discord(title: str, lines: list[str], severity: str = "info") -> bool:
 
 # ─── Core dispatch ────────────────────────────────────────────────────────────
 
-def _dispatch(subject: str, lines: list[str], severity: str = "info") -> None:
-    """Fan out to every enabled channel. Never raises."""
+def _dispatch(subject: str, lines: list[str], severity: str = "info",
+              kind: str = "general") -> None:
+    """Fan out to every enabled channel. Never raises.
+
+    `kind` (fill/close/halt/big_move/setup) is used only to honour the optional
+    DISCORD_EVENT_KINDS filter — other channels always receive every event.
+    """
     # Always record to the dashboard feed first, regardless of channels.
     _log_event(subject, lines, severity)
 
@@ -231,7 +247,8 @@ def _dispatch(subject: str, lines: list[str], severity: str = "info") -> None:
     text = f"{subject}\n\n{body}"
     _send_telegram(text)
     _send_email(subject, body)
-    _send_discord(subject, lines, severity)
+    if not _DISCORD_KINDS or kind in _DISCORD_KINDS:
+        _send_discord(subject, lines, severity)
     # SMS is intrusive — by default only for urgent events (non-"info"), unless
     # SMS_ALL_EVENTS is set. Setup heads-ups are "info" → no texts by default.
     if _SMS_ALL or severity != "info":
@@ -251,6 +268,7 @@ def notify_trade_filled(strategy: str, ticker: str, contract: str,
             f"Cost: ${cost:,.2f}",
         ],
         severity = "success",
+        kind     = "fill",
     )
 
 
@@ -270,6 +288,7 @@ def notify_position_closed(ticker: str, contract: str,
         subject  = f"Position closed — {ticker} {contract}",
         lines    = lines,
         severity = severity,
+        kind     = "close",
     )
 
 
@@ -285,6 +304,7 @@ def notify_halt_triggered(equity: float, pnl: float, limit: float) -> None:
             "Bot will not open new positions until tomorrow.",
         ],
         severity = "danger",
+        kind     = "halt",
     )
 
 
@@ -377,7 +397,7 @@ def notify_trade_setups(setups: list[dict], style: str, strategy: str,
 
         subject = (f"{label} setups — {len(fresh)} new candidate(s)"
                    + (" (watchlist)" if any_watch else ""))
-        _dispatch(subject=subject, lines=lines, severity="info")
+        _dispatch(subject=subject, lines=lines, severity="info", kind="setup")
         return len(fresh)
     except Exception as e:
         log.warning("notify_trade_setups failed: %s", e)
@@ -418,6 +438,7 @@ def notify_big_move(ticker: str, option_symbol: str, contract: str,
             f"P&L:     {pnl_pct:+.1f}%",
         ],
         severity = severity,
+        kind     = "big_move",
     )
 
 
