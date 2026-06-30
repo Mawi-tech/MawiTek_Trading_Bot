@@ -1,7 +1,7 @@
 """Tests for analytics_metrics: Sharpe, drawdown, profit factor, expectancy."""
 
 import math
-import analytics_metrics as am
+import mawitek.analysis.analytics_metrics as am
 
 
 def test_max_drawdown_simple():

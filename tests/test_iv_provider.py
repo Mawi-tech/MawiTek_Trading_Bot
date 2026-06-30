@@ -2,7 +2,7 @@
 
 import math
 
-import iv_provider as iv
+import mawitek.data.iv_provider as iv
 
 
 # ─── compute_hv ─────────────────────────────────────────────────────────────────

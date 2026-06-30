@@ -3,9 +3,9 @@ pre_trade_check. Flatten is NOT exercised here (it would hit the broker)."""
 
 import pytest
 
-import bot_control as bc
-import risk_manager as rm
-import market_regime as mr
+import mawitek.core.bot_control as bc
+import mawitek.core.risk_manager as rm
+import mawitek.data.market_regime as mr
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +54,7 @@ def test_control_block_reason_fails_open(monkeypatch):
 
 def test_paused_list_sanitized(monkeypatch):
     # Unknown names in a hand-edited file are dropped on read.
-    from state_io import atomic_write_json
+    from mawitek.infra.state_io import atomic_write_json
     atomic_write_json("control_state.json",
                       {"manual_halt": False, "paused_strategies": ["iv_rank", "junk"]})
     assert bc.status()["paused_strategies"] == ["iv_rank"]

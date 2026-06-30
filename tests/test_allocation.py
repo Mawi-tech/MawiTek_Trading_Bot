@@ -1,6 +1,6 @@
 """Tests for per-strategy capital allocation in risk_manager."""
 
-import risk_manager as rm
+import mawitek.core.risk_manager as rm
 
 
 def test_strategy_budget_uncapped_when_unknown_strategy():
@@ -42,7 +42,7 @@ def test_strategy_budget_unrestricted_when_nothing_deployed(monkeypatch):
 
 def test_deployed_capital_reads_positions(tmp_path, monkeypatch):
     # Point position loader at a synthetic book
-    import position_manager as pm
+    import mawitek.core.position_manager as pm
     fake = {
         "AAPL260101C00200000": {"strategy": "catalyst_long_call", "entry_price": 4.0, "quantity": 2},
         "NVDA260101C00800000": {"strategy": "catalyst_long_call", "entry_price": 10.0, "quantity": 1},

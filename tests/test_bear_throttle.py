@@ -1,7 +1,7 @@
 """Tests for the bear-market risk throttle in risk_manager."""
 
-import risk_manager as rm
-import market_regime as mr
+import mawitek.core.risk_manager as rm
+import mawitek.data.market_regime as mr
 
 
 # ── _bear_throttle unit ──────────────────────────────────────────────────────

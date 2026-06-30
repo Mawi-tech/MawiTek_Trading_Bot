@@ -6,9 +6,9 @@ winners outweigh the more-frequent small losers. These tests lock in that intent
 so a future edit can't silently revert to the breakeven symmetric config.
 """
 
-import hft_executor as hx
-import hft_scanner as hs
-import backtest_hft as bt
+import mawitek.strategies.hft_executor as hx
+import mawitek.strategies.hft_scanner as hs
+import backtests.backtest_hft as bt
 
 
 def test_exits_are_asymmetric():

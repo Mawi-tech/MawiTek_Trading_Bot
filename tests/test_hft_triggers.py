@@ -1,7 +1,7 @@
 """Tests for the new intraday triggers + confluence/conviction logic."""
 
 import pandas as pd
-import hft_scanner as hs
+import mawitek.strategies.hft_scanner as hs
 
 
 def _df(highs, lows, closes, vols, opens=None):

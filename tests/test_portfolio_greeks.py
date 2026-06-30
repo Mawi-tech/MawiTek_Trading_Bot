@@ -1,7 +1,7 @@
 """Tests for portfolio greeks aggregation + the risk-manager vega limit."""
 
-import portfolio_greeks as pg
-import risk_manager as rm
+import mawitek.core.portfolio_greeks as pg
+import mawitek.core.risk_manager as rm
 
 
 # ─── aggregate_greeks (pure math) ───────────────────────────────────────────────
@@ -56,7 +56,7 @@ def test_cached_net_vega_none_without_priced(tmp_path, monkeypatch):
 
 def _set_vega(monkeypatch, value):
     """Force the cached net vega the risk manager reads."""
-    import portfolio_greeks
+    import mawitek.core.portfolio_greeks as portfolio_greeks
     monkeypatch.setattr(portfolio_greeks, "cached_net_vega", lambda: value)
 
 

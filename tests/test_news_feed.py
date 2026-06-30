@@ -1,6 +1,6 @@
 """Tests for the news feed: headline categorization, impact, merge/dedup."""
 
-import news_feed as nf
+import mawitek.data.news_feed as nf
 
 
 # ── Categorization ───────────────────────────────────────────────────────────

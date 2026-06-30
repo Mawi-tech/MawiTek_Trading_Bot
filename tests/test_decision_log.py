@@ -1,6 +1,6 @@
 """Tests for decision-log dedup (collapses repeated identical decisions)."""
 
-import decision_log as dl
+import mawitek.core.decision_log as dl
 
 
 def _count_lines(path):

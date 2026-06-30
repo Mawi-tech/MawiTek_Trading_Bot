@@ -10,7 +10,7 @@ P&L baseline and made "today" read +$73k.
 import json
 import os
 
-import equity_tracker as et
+import mawitek.core.equity_tracker as et
 
 
 def _write_curve(records):
@@ -39,7 +39,7 @@ def test_snapshot_persists_on_good_read(tmp_path, monkeypatch):
     monkeypatch.setattr(et, "get_account_balance",
                         lambda: {"total_equity": 90000.0, "cash": 0})
     monkeypatch.setattr(et, "calculate_unrealized_pnl", lambda: (500.0, 20000.0))
-    import trade_journal
+    import mawitek.core.trade_journal as trade_journal
     monkeypatch.setattr(trade_journal, "get_realized_pnl_today", lambda: 100.0)
 
     snap = et.snapshot_equity()
@@ -92,7 +92,7 @@ def test_baseline_skips_nonpositive_equity(tmp_path, monkeypatch):
 
 def test_baseline_none_when_no_prior_day(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    from utils import today_est
+    from mawitek.infra.utils import today_est
     _write_curve([{"date": today_est().isoformat(), "equity": 85000.0}])
     # Only today's snapshots exist → no prior baseline.
     assert et.get_baseline_equity_for_today() is None

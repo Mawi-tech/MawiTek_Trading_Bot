@@ -1,7 +1,7 @@
 """Tests for IV-rank exit decisions and multi-leg P&L math."""
 
-import iv_rank_bot as ivr
-import trade_journal as tj
+import mawitek.strategies.iv_rank_bot as ivr
+import mawitek.core.trade_journal as tj
 
 
 def _spread_pos(credit=1.20, qty=2):

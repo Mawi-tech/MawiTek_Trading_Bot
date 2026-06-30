@@ -1,6 +1,6 @@
 """Tests for the multi-source news layer: RSS/SEC parsing, dedup, aggregation."""
 
-import news_sources as ns
+import mawitek.data.news_sources as ns
 
 
 # ── Normalization ─────────────────────────────────────────────────────────────

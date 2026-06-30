@@ -9,8 +9,8 @@ exit management. strict=True now raises BrokerReadError on a failed read.
 
 import pytest
 
-import tradier_client as tc
-from tradier_client import BrokerReadError
+import mawitek.data.tradier_client as tc
+from mawitek.data.tradier_client import BrokerReadError
 
 
 class _Resp:
@@ -89,7 +89,7 @@ def test_balance_nonstrict_returns_zeros_on_failure(monkeypatch):
 # ── reconcilers must no-op on a failed read (not nuke the book) ────────────────
 
 def test_pead_reconcile_noops_on_broker_failure(monkeypatch):
-    import pead_executor as pe
+    import mawitek.strategies.pead_executor as pe
     monkeypatch.setattr(pe, "MOCK_MODE", False)
     monkeypatch.setattr(pe, "_load_positions",
                         lambda: [{"option_symbol": "AAPL260101C00150000",
@@ -108,8 +108,8 @@ def test_pead_reconcile_noops_on_broker_failure(monkeypatch):
 
 
 def test_risk_reconcile_noops_on_broker_failure(monkeypatch):
-    import risk_manager as rm
-    import position_manager as pm
+    import mawitek.core.risk_manager as rm
+    import mawitek.core.position_manager as pm
     def fail(*a, **k):
         raise BrokerReadError("positions read failed")
     monkeypatch.setattr(rm, "get_open_positions", fail)

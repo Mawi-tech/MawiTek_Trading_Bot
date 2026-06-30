@@ -2,9 +2,9 @@
 
 import datetime
 
-import dashboard_state as ds
-import risk_manager as rm
-from utils import now_est
+import mawitek.dashboard.dashboard_state as ds
+import mawitek.core.risk_manager as rm
+from mawitek.infra.utils import now_est
 
 
 def _tickers(setups):

@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-import signal_publisher as sp
+import mawitek.dashboard.signal_publisher as sp
 
 
 # A realistic closed-trade row, full of account-private fields.

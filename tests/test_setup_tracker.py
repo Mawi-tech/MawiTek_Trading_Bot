@@ -2,8 +2,8 @@
 
 import datetime
 
-import setup_tracker as st
-from utils import now_est
+import mawitek.analysis.setup_tracker as st
+from mawitek.infra.utils import now_est
 
 
 def _aged(hours: float) -> str:

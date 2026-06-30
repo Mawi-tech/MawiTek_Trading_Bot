@@ -4,8 +4,8 @@ import json
 
 import pandas as pd
 
-import pead_scanner as pead
-import risk_manager as rm
+import mawitek.strategies.pead_scanner as pead
+import mawitek.core.risk_manager as rm
 
 
 # ── Synthetic daily frames ───────────────────────────────────────────────────
@@ -134,7 +134,7 @@ def test_inverse_etf_excluded():
 # ── Daily-bar cache (live scan perf) ─────────────────────────────────────────
 
 def test_daily_cache_reuses_within_ttl(monkeypatch):
-    import market_data
+    import mawitek.data.market_data as market_data
     pead.clear_daily_cache()
     calls = {"n": 0}
 
@@ -150,7 +150,7 @@ def test_daily_cache_reuses_within_ttl(monkeypatch):
 
 
 def test_daily_cache_skips_empty(monkeypatch):
-    import market_data
+    import mawitek.data.market_data as market_data
     pead.clear_daily_cache()
     calls = {"n": 0}
 

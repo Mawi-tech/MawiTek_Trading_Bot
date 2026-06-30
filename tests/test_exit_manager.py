@@ -1,6 +1,6 @@
 """Tests for the shared trailing-stop + scale-out exit logic."""
 
-import exit_manager as em
+import mawitek.core.exit_manager as em
 
 CFG = em.TrailScaleConfig(trail_activate=0.40, trail_giveback=0.25,
                           scale_trigger=0.50, scale_fraction=0.5, scale_min_qty=2)

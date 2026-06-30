@@ -3,9 +3,9 @@ and its wiring into risk_manager."""
 
 import pytest
 
-import user_config as uc
-import risk_manager as rm
-import market_regime as mr
+import mawitek.core.user_config as uc
+import mawitek.core.risk_manager as rm
+import mawitek.data.market_regime as mr
 
 
 @pytest.fixture(autouse=True)

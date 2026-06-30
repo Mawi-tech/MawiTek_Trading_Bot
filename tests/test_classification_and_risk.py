@@ -1,7 +1,7 @@
 """Tests for position classification (spread detection) and risk sizing math."""
 
-import dashboard_state as ds
-import risk_manager as rm
+import mawitek.dashboard.dashboard_state as ds
+import mawitek.core.risk_manager as rm
 
 
 def _leg(qty, opt_type, strike):

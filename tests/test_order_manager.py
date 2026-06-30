@@ -1,6 +1,6 @@
 """Tests for order_manager: order-state interpretation, fills, tagging."""
 
-import order_manager as om
+import mawitek.core.order_manager as om
 
 
 def test_interpret_filled():

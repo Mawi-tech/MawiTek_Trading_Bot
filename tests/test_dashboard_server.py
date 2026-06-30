@@ -15,7 +15,7 @@ import urllib.error
 import pytest
 from http.server import ThreadingHTTPServer
 
-import dashboard_server as dsrv
+import mawitek.dashboard.dashboard_server as dsrv
 
 
 @pytest.fixture()

@@ -39,87 +39,74 @@ Multi-strategy options trading bot with a live dashboard, risk management, and b
 ## File Structure
 
 ```
-CORE
-  executor.py              Strategy 1 (catalyst) main loop
-  iv_rank_bot.py           Strategy 2 (IV-rank premium) loop
-  hft_executor.py          Strategy 3 (intraday HFT) loop
-  hft_scanner.py           Intraday signal scanner (VWAP/ORB/spike/range/bounce/strong-bar + conviction)
-  pead_executor.py         Strategy 4 (post-earnings / news-drift) loop
-  pead_scanner.py          Daily-bar gap+drift detector (re-exports market_regime helpers)
-  bounce_executor.py       Strategy 5 (capitulation-bounce) loop
-  bounce_scanner.py        Regime-gated bear-only down-gap → long-call setup
-  news_feed.py             News monitor: multi-source headlines + social sweep (News/Social tabs + alerts)
-  news_sources.py          Aggregates Tradier + Google News RSS + yfinance + SEC 8-K, dedups near-dupes
-  social_sentiment.py      Per-ticker Stocktwits + Reddit sentiment (Social tab)
-  start_all.py             Launch all components together + watchdog
+mawitek/                    Python package — run modules via `python -m mawitek.<sub>.<mod>`
+  run/start_all.py          Launch all components + watchdog (the entry point)
+  strategies/               Trading loops + signal scanners + contract selection
+    executor.py             Strategy 1 — catalyst swing (RETIRED; exits only)
+    iv_rank_bot.py          Strategy 2 — IV-rank premium (spreads/condors/straddles)
+    hft_executor.py         Strategy 3 — intraday 0-DTE momentum
+    hft_scanner.py          Intraday signal scanner (VWAP/ORB/spike/range/bounce)
+    pead_executor.py        Strategy 4 — post-earnings / news drift
+    pead_scanner.py         Daily-bar gap+drift detector
+    bounce_executor.py      Strategy 5 — bear-regime capitulation bounce
+    bounce_scanner.py       Regime-gated down-gap setup
+    options_scanner.py      4-filter pipeline (earnings/flow/news/momentum)
+    option_selector.py      Expiry + strike selection
+  core/                     Risk, orders, positions, journaling, control
+    risk_manager.py         Sizing, halts, allocation, caps, drawdown governor, retired/paused gates
+    order_manager.py        Place + poll-to-fill, crash recovery
+    position_manager.py     Catalyst exit logic + shared position I/O
+    position_book.py        Shared single-leg book I/O (strategies 3-5)
+    trade_journal.py        Closed-trade history
+    decision_log.py         Why each trade taken/rejected (JSONL)
+    equity_tracker.py       Mark-to-market equity snapshots
+    exit_manager.py         Trailing-stop + scale-out helpers
+    portfolio_greeks.py     Net Greeks (drives the vega cap)
+    kill_switch.py          Emergency flatten-all
+    bot_control.py          Runtime halt / pause-strategy control
+    user_config.py          Account-size tiers + dashboard overrides
+  data/                     Market data, feeds, providers, universe, broker
+    tradier_client.py       Tradier API wrapper + option-mid pricing
+    market_data.py          Daily/intraday bars + news
+    market_filter.py        Liquidity filter (per-ET-day cache)
+    market_regime.py        SPY vs 200d-SMA regime
+    earnings_provider.py    Multi-source earnings API + cache
+    earnings_filter.py      Earnings-window filter (thin wrapper)
+    iv_provider.py          Per-ticker IV context
+    news_feed.py            News monitor (multi-source + social)
+    news_sources.py         Tradier + Google News + yfinance + SEC 8-K
+    news_catalyst.py        Headline sentiment scoring
+    social_sentiment.py     Stocktwits + Reddit sentiment
+    options_flow.py         Bullish call-sweep detection
+    momentum_scorer.py      Price/volume momentum (0-100)
+    universe.py             Universe selection + rotation
+    screen_universe.py      Pre-screen market -> liquid_universe.csv
+    update_universe.py      Build sp500.csv / market_universe.csv
+  dashboard/                Dashboard + public signal feed
+    dashboard_state.py      Assembles dashboard_state.json
+    dashboard_server.py     Static server (allowlist + security headers)
+    signal_publisher.py     Sanitized public signal feed (signal service)
+  analysis/                 Metrics + validation
+    analytics_metrics.py    Sharpe, drawdown, profit factor, expectancy
+    setup_tracker.py        Scanner hit-rate / forward returns
+    walk_forward.py         In/out-of-sample + live-vs-backtest divergence
+    lifecycle_validator.py  End-to-end paper round-trip (Tradier sandbox)
+    sandbox_validator.py    Pre-flight API connection check
+    daily_report.py         End-of-day digest
+  infra/                    Cross-cutting utilities
+    state_io.py             Atomic writes + cross-process file locks
+    logger.py               Centralized rotating logging
+    heartbeat.py            Per-strategy liveness signals
+    utils.py                Timezone (ET) + helpers
+    event_notifier.py       Telegram/Discord/email alerts + events feed
 
-SCANNING & SELECTION
-  options_scanner.py       4-filter pipeline for Strategy 1 (earnings, flow, news, momentum)
-  earnings_filter.py       Earnings date lookup + window filter (thin wrapper)
-  earnings_provider.py     Multi-source earnings API with disk cache
-  options_flow.py          Bullish call sweep detection via Tradier chain
-  news_catalyst.py         News headline sentiment scoring
-  momentum_scorer.py       Price/volume momentum scoring (0–100)
-  option_selector.py       Expiry + strike selection for Strategy 1
-  market_filter.py         Liquidity filter with per-ET-day cache
-  market_data.py           Tradier-backed daily/intraday bars + news
-  market_regime.py         Shared SPY vs 200d-SMA regime read (cached per ET day)
-  universe.py              Universe CSV selection + per-scanner rotation offsets
-  screen_universe.py       Pre-screen the full market to liquid_universe.csv (~1.1k tradable names)
-  update_universe.py       Build sp500.csv + market_universe.csv (run weekly/monthly)
-  iv_provider.py           Per-ticker IV context (ATM IV, IV/HV, IV rank/percentile, regime)
+backtests/                  Strategy backtesters — run: `python -m backtests.<name>`
+                            backtest_hft / iv_rank / pead / bounce / bear_call / crush / orb / vwap_bounce
+tests/                      pytest suite (427 tests, MOCK_MODE, no network)
+docs/                       ARCHITECTURE.md, CONTROL_API.md, REMOTE_ACCESS.md, build_docx.js
+dashboard.html              Single-page dashboard (served by dashboard_server)
+requirements.txt  README.md  LICENSE
 
-RISK & POSITION MANAGEMENT
-  risk_manager.py          Position sizing, daily loss limit, halt, per-strategy capital, swing/day caps, correlation cap, bear throttle, vega cap, IV-aware sizing
-  portfolio_greeks.py      Net book Δ/Γ/Θ/V aggregation (drives the vega cap)
-  exit_manager.py          Shared trailing-stop + scale-out helpers (hft/pead/bounce)
-  position_manager.py      Catalyst exit logic (TP/SL/expiry/post-earnings)
-  trade_journal.py         Closed-trade history (closed_trades.json)
-  decision_log.py          Why each trade was taken/rejected (JSONL, deduped)
-  equity_tracker.py        Mark-to-market equity snapshots
-
-BROKER & NOTIFICATIONS
-  tradier_client.py        Tradier API wrapper + shared option-mid pricing
-  event_notifier.py        Telegram / Discord / email alerts (fills, halts, big moves); also drives the events.json feed for the dashboard
-
-DASHBOARD
-  dashboard.html           Single-page dashboard (Overview, Strategies, News, Social, Trade History, Decision Log, Analytics)
-  dashboard_state.py       Assembles state JSON for the dashboard
-  dashboard_server.py      Static file server on :8000 (with allowlist + security headers)
-
-ORDER EXECUTION & SAFETY
-  order_manager.py         Place orders + poll until real fill (price/qty), crash recovery via pending-order ledger
-  state_io.py              Atomic writes + cross-process file locks for shared JSON state
-  kill_switch.py           Emergency flatten-all: cancel orders, close positions, halt
-  heartbeat.py             Per-strategy liveness signals (watchdog reads these)
-  daily_report.py          End-of-day summary digest via event_notifier
-
-ANALYSIS
-  analytics_metrics.py     Sharpe, max drawdown, profit factor, expectancy, win rate
-  setup_tracker.py         Scanner hit-rate: forward returns + win/loss by score bucket
-  walk_forward.py          In-sample vs out-of-sample validation + live-vs-backtest divergence
-
-INFRASTRUCTURE
-  utils.py                 Timezone helpers (US/Eastern), percent_change, parse_isodt, spread_pct, is_market_open
-  position_book.py         Shared single-leg position-book I/O for Strategies 3–5
-  logger.py                Centralized rotating file + console logging
-  sandbox_validator.py     Pre-flight check for all API connections
-  lifecycle_validator.py   End-to-end paper round-trip against Tradier sandbox
-
-BACKTESTING
-  backtest.py              Catalyst strategy backtester (with IV crush — see header notes)
-  backtest_hft.py          HFT strategy backtester (real sandbox 5m bars)
-  backtest_iv_rank.py      IV-rank strategy backtester
-  backtest_pead.py         PEAD / news-drift backtester (yfinance daily + BS pricing)
-  backtest_bounce.py       Capitulation-bounce backtester (regime-gated long calls)
-  backtest_bear_call.py    Bear-call credit-spread experiment (REJECTED — kept for reference)
-  backtest_crush.py        Earnings IV-crush iron-condor experiment (REJECTED — kept for reference)
-  backtest_orb.py          Standalone opening-range-breakout backtester
-  backtest_vwap_bounce.py  Standalone VWAP-bounce backtester
-  backtest_dashboard.html  Backtest results viewer
-
-TESTS
-  tests/                   pytest suite (328 tests, runs in MOCK_MODE, no network)
 ```
 
 ## Quick Start
@@ -144,25 +131,25 @@ DISCORD_WEBHOOK_URL=...
 
 ### 3. Validate setup
 ```bash
-python sandbox_validator.py
+python -m mawitek.analysis.sandbox_validator
 ```
 
 ### 4. Refresh the universe (first time + monthly)
 ```bash
-python update_universe.py       # writes sp500.csv (~503 names)
+python -m mawitek.data.update_universe       # writes sp500.csv (~503 names)
 ```
 
 ### 5. Run
 ```bash
 # Single strategy
-python executor.py
+python -m mawitek.strategies.executor
 
 # All five strategies + news monitor + dashboard + watchdog
-python start_all.py
+python -m mawitek.run.start_all
 
 # Dashboard only (separate terminal — use this server, NOT `python -m http.server`,
 # because it enforces an allowlist that prevents serving .env and state files)
-python dashboard_server.py
+python -m mawitek.dashboard.dashboard_server
 # Open http://localhost:8000/dashboard.html
 ```
 
@@ -203,23 +190,23 @@ python dashboard_server.py
 | **Order fill confirmation** | `order_manager.py` polls the broker until an order truly fills, then records the **real** fill price/qty — not an assumed mid. Handles partial fills, rejections, and cancels the unfilled remainder on timeout. |
 | **Crash recovery** | A pending-order ledger + `recover_pending_orders()` (run at each strategy's startup) resolve in-flight orders after a crash, so fills aren't lost or double-submitted. Recovered fills push a loud event-notifier alert. |
 | **Concurrent-safe state** | `state_io.py` gives shared JSON files atomic writes + cross-process locks, so the five strategy processes never corrupt `risk_state.json`, `closed_trades.json`, etc. `allow_nan=False` rejects Infinity/NaN so the dashboard's `JSON.parse` can't break. |
-| **Kill switch** | `python kill_switch.py` cancels all orders, closes all positions at market, and sets the halt flag. Typed `FLATTEN` confirmation; `--force` to skip; `--status` for a dry run. |
+| **Kill switch** | `python -m mawitek.core.kill_switch` cancels all orders, closes all positions at market, and sets the halt flag. Typed `FLATTEN` confirmation; `--force` to skip; `--status` for a dry run. |
 | **Watchdog** | Each strategy writes a heartbeat; `start_all.py` alerts when a process dies **or** stalls (alive but hung, e.g. wedged network call). |
-| **Daily summary** | `daily_report.py` sends an end-of-day digest (P&L, trades, halts, overnight exposure). Auto-fires after the close; or run `python daily_report.py`. |
+| **Daily summary** | `daily_report.py` sends an end-of-day digest (P&L, trades, halts, overnight exposure). Auto-fires after the close; or run `python -m mawitek.analysis.daily_report`. |
 | **Timezone safety** | All "today" / "now" comparisons go through `utils.now_est()` / `utils.today_est()` — the bot agrees with the market on what day it is regardless of where the host runs. |
 | **Dashboard server** | `dashboard_server.py` enforces a file allowlist (`.html / .css / .js / dashboard_state.json / backtest_equity.json / news_feed.json / social_sentiment.json`) so the static server can't accidentally serve `.env` or other state files. Optional HTTP Basic Auth (`DASH_AUTH_USER`/`DASH_AUTH_PASS`). Loopback-only by default. |
 
 ## Analysis Tools
 
 ```bash
-python analytics_metrics.py                          # portfolio metrics
-python walk_forward.py                               # overfitting check (in vs out-of-sample)
-python walk_forward.py --vs backtest_results.json    # live-vs-backtest divergence
-python earnings_provider.py lookup AAPL NVDA         # earnings dates (API + cache)
-python backtest_hft.py --tickers SPY QQQ AAPL TSLA --days 30   # validate HFT triggers
-python backtest_pead.py --days 730                              # validate PEAD strategy
-python backtest_bounce.py                                       # validate the bounce strategy
-python -m pytest tests/ -q                            # run the test suite (328 tests)
+python -m mawitek.analysis.analytics_metrics                          # portfolio metrics
+python -m mawitek.analysis.walk_forward                               # overfitting check (in vs out-of-sample)
+python -m mawitek.analysis.walk_forward --vs backtest_results.json    # live-vs-backtest divergence
+python -m mawitek.data.earnings_provider lookup AAPL NVDA         # earnings dates (API + cache)
+python -m backtests.backtest_hft --tickers SPY QQQ AAPL TSLA --days 30   # validate HFT triggers
+python -m backtests.backtest_pead --days 730                              # validate PEAD strategy
+python -m backtests.backtest_bounce                                       # validate the bounce strategy
+python -m pytest tests/ -q                            # run the test suite (427 tests)
 ```
 
 > The HFT backtest reports a **by-conviction** breakdown (proven VWAP+ORB+spike trio
@@ -233,8 +220,8 @@ Before trusting the bot with a live session, validate the full order lifecycle
 against the Tradier **sandbox** (paper money):
 
 ```bash
-python lifecycle_validator.py          # read-only pre-flight (safe anytime)
-python lifecycle_validator.py --run    # full paper round-trip (asks to confirm)
+python -m mawitek.analysis.lifecycle_validator          # read-only pre-flight (safe anytime)
+python -m mawitek.analysis.lifecycle_validator --run    # full paper round-trip (asks to confirm)
 ```
 
 The pre-flight checks credentials, sandbox mode, buying power, market hours, and

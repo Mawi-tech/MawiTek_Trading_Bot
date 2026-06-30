@@ -2,7 +2,7 @@
 
 import json
 
-import risk_manager as rm
+import mawitek.core.risk_manager as rm
 
 
 def _write(path, obj):

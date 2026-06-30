@@ -7,7 +7,7 @@ rolling weekly loss limit. The HWM anchors at current equity on first run.
 
 import json
 
-import risk_manager as rm
+import mawitek.core.risk_manager as rm
 
 
 def _write(path, obj):

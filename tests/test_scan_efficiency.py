@@ -9,8 +9,8 @@ import datetime
 
 import pandas as pd
 
-import market_filter as mf
-import hft_scanner as hs
+import mawitek.data.market_filter as mf
+import mawitek.strategies.hft_scanner as hs
 
 
 # ── Daily liquidity cache ────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ def test_liquidity_cache_invalidated_next_day(tmp_path, monkeypatch):
     monkeypatch.setattr(mf, "get_daily_data", fake_get_daily_data)
 
     # Seed a cache file stamped with YESTERDAY's date — it must be ignored.
-    from state_io import atomic_write_json
+    from mawitek.infra.state_io import atomic_write_json
     yesterday = (mf.today_est() - datetime.timedelta(days=1)).isoformat()
     atomic_write_json(mf._LIQUIDITY_CACHE_FILE, {
         "date": yesterday,

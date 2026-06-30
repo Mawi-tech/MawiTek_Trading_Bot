@@ -1,7 +1,7 @@
 """Tests for the separate swing/day position budgets."""
 
 import json
-import risk_manager as rm
+import mawitek.core.risk_manager as rm
 
 
 # ── trade type mapping ───────────────────────────────────────────────────────

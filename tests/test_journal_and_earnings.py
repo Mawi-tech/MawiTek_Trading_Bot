@@ -3,9 +3,9 @@
 import datetime
 import time
 
-import trade_journal as tj
-import earnings_provider as ep
-import heartbeat as hb
+import mawitek.core.trade_journal as tj
+import mawitek.data.earnings_provider as ep
+import mawitek.infra.heartbeat as hb
 
 
 # ── Trade journal P&L ────────────────────────────────────────────────────────

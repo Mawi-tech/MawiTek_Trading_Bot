@@ -1,6 +1,6 @@
 """Tests for social sentiment aggregation (Stocktwits + Reddit) and merge."""
 
-import social_sentiment as ss
+import mawitek.data.social_sentiment as ss
 
 
 # ── Stocktwits ────────────────────────────────────────────────────────────────

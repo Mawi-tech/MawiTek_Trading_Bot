@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-import event_notifier as en
-import user_config as uc
+import mawitek.infra.event_notifier as en
+import mawitek.core.user_config as uc
 
 
 @pytest.fixture(autouse=True)

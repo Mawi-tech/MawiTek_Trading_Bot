@@ -4,9 +4,7 @@ import os
 import json
 import multiprocessing
 
-import state_io
-
-
+import mawitek.infra.state_io as state_io
 def test_atomic_write_and_read(tmp_path):
     p = str(tmp_path / "x.json")
     state_io.atomic_write_json(p, {"a": 1, "b": [1, 2, 3]})
@@ -87,7 +85,7 @@ def test_file_lock_breaks_stale(tmp_path):
 
 
 def _incr_worker(path, iterations):
-    import state_io as sio
+    import mawitek.infra.state_io as sio
     for _ in range(iterations):
         sio.update_json(path, lambda s: {"n": s.get("n", 0) + 1}, default={"n": 0})
 

@@ -4,10 +4,10 @@ import json
 import os
 import time
 
-import dashboard_state as ds
-import heartbeat as hb
-import risk_manager as rm
-import event_notifier as en
+import mawitek.dashboard.dashboard_state as ds
+import mawitek.infra.heartbeat as hb
+import mawitek.core.risk_manager as rm
+import mawitek.infra.event_notifier as en
 
 
 def _write(path, obj):

@@ -3,8 +3,8 @@ and update_universe symbol filtering (warrants/units/preferreds/test issues)."""
 
 import os
 
-import universe
-import update_universe as uu
+import mawitek.data.universe as universe
+import mawitek.data.update_universe as uu
 
 
 # ─── market_csv() preference ────────────────────────────────────────────────────
@@ -65,7 +65,7 @@ def test_rotation_keys_are_independent(tmp_path, monkeypatch):
 # ─── screener config ────────────────────────────────────────────────────────────
 
 def test_screen_universe_cuts_microcaps_by_dollar_volume():
-    import screen_universe as su
+    import mawitek.data.screen_universe as su
     # The micro-cap / illiquid floor: $5 price, 1M shares, $20M dollar volume.
     assert su.MIN_PRICE == 5.0
     assert su.MIN_AVG_VOLUME == 1_000_000

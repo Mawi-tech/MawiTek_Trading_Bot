@@ -1,6 +1,6 @@
 """Tests for walk_forward: sequential splitting, degradation, divergence."""
 
-import walk_forward as wf
+import mawitek.analysis.walk_forward as wf
 
 
 def _t(pnl, day, strat="a"):

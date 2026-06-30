@@ -1,6 +1,6 @@
 """Tests for IV-aware position sizing in the risk manager (the IV → trade wiring)."""
 
-import risk_manager as rm
+import mawitek.core.risk_manager as rm
 
 
 def _ctx(regime, rank=None, ratio=None):
@@ -51,13 +51,13 @@ def test_config_sane():
 # ─── _iv_size_mult (fails open) ──────────────────────────────────────────────────
 
 def test_iv_size_mult_fails_open(monkeypatch):
-    import iv_provider
+    import mawitek.data.iv_provider as iv_provider
     monkeypatch.setattr(iv_provider, "iv_context", lambda t: (_ for _ in ()).throw(RuntimeError("boom")))
     assert rm._iv_size_mult("pead", "AAA") == 1.0     # error → no change
 
 
 def test_iv_size_mult_applies_when_rich(monkeypatch):
-    import iv_provider
+    import mawitek.data.iv_provider as iv_provider
     monkeypatch.setattr(iv_provider, "iv_context", lambda t: _ctx("rich"))
     assert rm._iv_size_mult("pead", "AAA") == rm.IV_RICH_MULT
     # non-IV-sized strategy short-circuits without even calling iv_context
