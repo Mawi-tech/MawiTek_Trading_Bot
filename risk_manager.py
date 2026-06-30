@@ -209,6 +209,14 @@ STRATEGY_ALLOCATION_PCT = {
 # the crush). Enforced even when the tier config is unavailable.
 RETIRED_STRATEGIES = {"catalyst_long_call"}
 
+# Strategies PAUSED pending revalidation — like retired (no new entries; exits
+# still run), but TEMPORARY and reversible. hft_intraday is paused because its
+# live results are negative (15% win, ~-$1.9k) and its backtest is theta-blind
+# (delta-gamma only, no time decay), so its edge on 0-DTE options is unproven.
+# Re-enable ONLY after backtest_hft models theta and a config validates positive.
+# To un-pause: remove from this set AND add back to the tier enabled_strategies.
+PAUSED_STRATEGIES = {"hft_intraday"}
+
 # State file to persist daily P&L across restarts
 STATE_FILE      = "risk_state.json"
 HALT_EVENTS_FILE = "halt_events.json"   # NEW: persistent log of every halt event
@@ -962,6 +970,13 @@ def pre_trade_check(ticker: str, strategy: str | None = None) -> dict:
     if strategy in RETIRED_STRATEGIES:
         return _reject(
             f"{strategy} is retired (negative-EV) — new entries disabled",
+            equity=equity, budget=0, pnl=0,
+        )
+
+    # Paused strategy — temporarily disabled pending revalidation (exits run).
+    if strategy in PAUSED_STRATEGIES:
+        return _reject(
+            f"{strategy} is paused pending revalidation — new entries disabled",
             equity=equity, budget=0, pnl=0,
         )
 
