@@ -17,17 +17,17 @@ def test_strategy_budget_none_strategy_passthrough():
 
 
 def test_strategy_budget_clamps_to_remaining(monkeypatch):
-    # catalyst cap 40% of 100k = 40k; pretend 39k already deployed → 1k remaining
-    monkeypatch.setattr(rm, "deployed_capital_by_strategy", lambda: {"catalyst_long_call": 39_000})
-    budget, reject = rm._strategy_budget("catalyst_long_call", 100_000, 5000)
+    # pead cap 35% of 100k = 35k; pretend 34k already deployed → 1k remaining
+    monkeypatch.setattr(rm, "deployed_capital_by_strategy", lambda: {"pead": 34_000})
+    budget, reject = rm._strategy_budget("pead", 100_000, 5000)
     assert reject is None
     assert budget == 1000  # clamped to remaining allocation
 
 
 def test_strategy_budget_rejects_when_full(monkeypatch):
-    # 40k deployed vs 40k cap → no room
-    monkeypatch.setattr(rm, "deployed_capital_by_strategy", lambda: {"catalyst_long_call": 40_000})
-    budget, reject = rm._strategy_budget("catalyst_long_call", 100_000, 5000)
+    # 35k deployed vs 35k cap → no room
+    monkeypatch.setattr(rm, "deployed_capital_by_strategy", lambda: {"pead": 35_000})
+    budget, reject = rm._strategy_budget("pead", 100_000, 5000)
     assert budget == 0
     assert reject is not None and "allocation full" in reject
 
