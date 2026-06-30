@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -87,6 +89,28 @@ COMPONENTS: dict[str, dict] = {
 # ─── Helpers ────────────────────────────────────────────────────────────────────
 
 ROOT = Path(__file__).parent.resolve()
+
+# Single-instance guard: the launcher binds this loopback port for its lifetime.
+# A second launch can't bind it, so it refuses to start — preventing two fleets
+# (and two sets of real-money executors) from running at once. Released
+# automatically by the OS when the launcher exits, even on a crash. Override the
+# port with FLEET_LOCK_PORT; bypass the guard entirely with --force.
+_FLEET_LOCK_PORT = int(os.getenv("FLEET_LOCK_PORT", "8765"))
+
+
+def _acquire_singleton_lock() -> socket.socket | None:
+    """Bind the loopback lock port. Returns the held socket, or None if another
+    launcher already holds it. Keep the returned socket referenced for the whole
+    run so the lock stays held."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+    try:
+        s.bind(("127.0.0.1", _FLEET_LOCK_PORT))
+        s.listen(1)
+        return s
+    except OSError:
+        s.close()
+        return None
 
 
 def _check_env_ready() -> bool:
@@ -205,10 +229,26 @@ def main() -> int:
                         help="Skip the dashboard HTTP server.")
     parser.add_argument("--logs-dir",   default="logs",
                         help="Where to write per-component log files (default: ./logs).")
+    parser.add_argument("--force", action="store_true",
+                        help="Bypass the single-instance guard (start even if a fleet "
+                             "is already running). Use only when you really mean it.")
     args = parser.parse_args()
 
     if not _check_env_ready():
         return 1
+
+    # Single-instance guard — refuse to start a second fleet (would double up the
+    # real-money executors). Hold the lock for the whole run.
+    _fleet_lock = None
+    if not args.force:
+        _fleet_lock = _acquire_singleton_lock()
+        if _fleet_lock is None:
+            print("=" * 70)
+            print("  [start_all] A fleet is ALREADY RUNNING.")
+            print(f"  Refusing to start a second one (lock 127.0.0.1:{_FLEET_LOCK_PORT} is held).")
+            print("  Stop the running fleet first, or pass --force to override.")
+            print("=" * 70)
+            return 1
 
     # Decide what to run
     if args.only:
@@ -332,6 +372,9 @@ def main() -> int:
         # Reverse order so dashboard stops last (it doesn't depend on bots).
         for name in reversed(list(procs.keys())):
             _stop(procs[name], name)
+        if _fleet_lock is not None:
+            try: _fleet_lock.close()
+            except Exception: pass
         print("[start_all] All components stopped.")
 
     return 0

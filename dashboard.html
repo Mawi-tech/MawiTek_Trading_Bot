@@ -531,6 +531,7 @@ tr:last-child td { border-bottom: none; }
   <button class="nav-tab"        onclick="showTab('history',this)">Trade History</button>
   <button class="nav-tab"        onclick="showTab('decisions',this)">Decision Log</button>
   <button class="nav-tab"        onclick="showTab('analytics',this)">Analytics</button>
+  <button class="nav-tab"        onclick="showTab('glossary',this)">Glossary</button>
 </nav>
 
 <!-- ════════════════════════════════════════════════════════
@@ -894,6 +895,97 @@ tr:last-child td { border-bottom: none; }
 
 </div><!-- /tab-analytics -->
 
+<!-- ════════════════════════════════════════════════════════
+     GLOSSARY TAB  (static reference — see docs/GLOSSARY.md)
+════════════════════════════════════════════════════════ -->
+<div class="panel" id="tab-glossary">
+  <style>
+    #tab-glossary .gl-sec{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px 18px;margin-bottom:14px}
+    #tab-glossary .gl-sec h3{margin:0 0 4px;color:var(--blue);font-size:15px}
+    #tab-glossary .gl-sec .gl-sub{color:var(--muted);font-size:12px;margin:0 0 10px}
+    #tab-glossary .gl-row{display:flex;gap:14px;padding:7px 0;border-bottom:1px solid var(--border)}
+    #tab-glossary .gl-row:last-child{border-bottom:0}
+    #tab-glossary .gl-term{flex:0 0 170px;font-weight:600;color:var(--text);font-size:13px}
+    #tab-glossary .gl-def{flex:1;color:var(--muted);font-size:13px;line-height:1.5}
+    @media(max-width:640px){#tab-glossary .gl-row{flex-direction:column;gap:2px}#tab-glossary .gl-term{flex:none}}
+  </style>
+
+  <div style="margin:0 0 14px;color:var(--muted);font-size:13px">
+    Plain-English reference for the scanner's signals, scores, and data sources.
+    Type to filter. Full version: <code>docs/GLOSSARY.md</code>.
+  </div>
+  <input id="glSearch" oninput="filterGlossary(this.value)" placeholder="Filter terms…"
+         style="width:100%;max-width:340px;margin:0 0 16px;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);font-size:13px">
+
+  <div class="gl-sec">
+    <h3>Intraday signals — HFT scanner</h3>
+    <p class="gl-sub">Building blocks of a 0–1 DTE setup, detected on 5-minute bars, each scored 0–100.</p>
+    <div class="gl-row"><div class="gl-term">VWAP</div><div class="gl-def">Volume-Weighted Average Price — the intraday "fair value" line. Price above = bullish bias, below = bearish.</div></div>
+    <div class="gl-row"><div class="gl-term">VWAP reclaim</div><div class="gl-def">Price crosses back <b>above</b> VWAP on rising volume after being below it — a bullish momentum trigger.</div></div>
+    <div class="gl-row"><div class="gl-term">VWAP bounce</div><div class="gl-def">In an uptrend, price pulls back to VWAP, holds it as support, and turns up — a continuation entry.</div></div>
+    <div class="gl-row"><div class="gl-term">ORB</div><div class="gl-def">Opening Range Breakout — price breaks the high/low of the session's opening range.</div></div>
+    <div class="gl-row"><div class="gl-term">Volume spike</div><div class="gl-def">A bar trading at a large multiple of recent average volume — real participation behind a move.</div></div>
+    <div class="gl-row"><div class="gl-term">Range breakout</div><div class="gl-def">Price breaks the high/low of the last ~12 bars (≈1h) on volume — a fresh directional push.</div></div>
+    <div class="gl-row"><div class="gl-term">Momentum burst</div><div class="gl-def">A short-term surge (fast RSI/ROC) confirming acceleration. Scores but doesn't count toward the confluence floor (noisy alone).</div></div>
+    <div class="gl-row"><div class="gl-term">Strong bar</div><div class="gl-def">Price-action filter: the bar closes in the top/bottom ~30% of its range — buyers/sellers won the bar.</div></div>
+    <div class="gl-row"><div class="gl-term">Trend alignment</div><div class="gl-def">The setup's direction agrees with the broader intraday trend (a filter, not a standalone trigger).</div></div>
+    <div class="gl-row"><div class="gl-term">Prime session</div><div class="gl-def">The mid-session window (≈9:45 AM–2:45 PM ET) the bot trades — avoids the noisy open and EOD close.</div></div>
+  </div>
+
+  <div class="gl-sec">
+    <h3>How signals combine</h3>
+    <div class="gl-row"><div class="gl-term">Composite score</div><div class="gl-def">Weighted blend of the signals above (0–100); proven signals (VWAP/ORB/spike) weigh most. Must clear the minimum score.</div></div>
+    <div class="gl-row"><div class="gl-term">Confluence</div><div class="gl-def">How many distinct core signals fire at once. Floor of <b>3</b> — single/double-signal setups historically lost money.</div></div>
+    <div class="gl-row"><div class="gl-term">Conviction</div><div class="gl-def"><b>High</b> = the proven VWAP+ORB+spike trio all fire (full size). <b>Relaxed</b> = another qualifying combo (half size).</div></div>
+  </div>
+
+  <div class="gl-sec">
+    <h3>Post-earnings / news drift — PEAD scanner</h3>
+    <p class="gl-sub">Trades the continuation of a big news-driven move, after the gap.</p>
+    <div class="gl-row"><div class="gl-term">Drift</div><div class="gl-def">The tendency of a stock to keep moving in the direction of a large catalyst for days afterward.</div></div>
+    <div class="gl-row"><div class="gl-term">Event</div><div class="gl-def">A qualifying catalyst day: an abnormal daily return (≥ z-score threshold) + a minimum gap % + heavy volume.</div></div>
+    <div class="gl-row"><div class="gl-term">Gap</div><div class="gl-def">The overnight jump in price from the catalyst.</div></div>
+    <div class="gl-row"><div class="gl-term">Volume multiple</div><div class="gl-def">How many times normal volume the event traded — confirms it's real, not noise.</div></div>
+    <div class="gl-row"><div class="gl-term">Held fraction</div><div class="gl-def">How much of the move has stuck since it happened — only drift that held is traded.</div></div>
+    <div class="gl-row"><div class="gl-term">Trend gate</div><div class="gl-def">Only trades drift agreeing with the 50-day SMA slope — backtests showed this alignment is the whole edge.</div></div>
+  </div>
+
+  <div class="gl-sec">
+    <h3>Implied volatility &amp; options</h3>
+    <div class="gl-row"><div class="gl-term">IV</div><div class="gl-def">Implied Volatility — the market's expected future volatility baked into option prices. High IV = expensive options.</div></div>
+    <div class="gl-row"><div class="gl-term">IV Rank</div><div class="gl-def">Where today's IV sits in its 1-year range (0=low, 100=high). The IV-rank strategy <b>sells</b> premium when high.</div></div>
+    <div class="gl-row"><div class="gl-term">IV/HV ratio</div><div class="gl-def">Implied ÷ historical vol. &gt;1 means options price in more move than the stock has shown (rich).</div></div>
+    <div class="gl-row"><div class="gl-term">IV crush</div><div class="gl-def">The collapse of IV right after a known event (e.g. earnings). Why buying long premium <i>into</i> earnings loses — and why Strategy 1 was retired.</div></div>
+    <div class="gl-row"><div class="gl-term">DTE / 0-DTE</div><div class="gl-def">Days To Expiration. 0-DTE expires the same day (max gamma, max theta decay).</div></div>
+    <div class="gl-row"><div class="gl-term">ATM</div><div class="gl-def">At-The-Money — strike ≈ the current stock price.</div></div>
+    <div class="gl-row"><div class="gl-term">Greeks (Δ Γ Θ V)</div><div class="gl-def">Sensitivity to price (delta), to delta (gamma), to time decay (theta — the daily bleed), and to IV (vega).</div></div>
+    <div class="gl-row"><div class="gl-term">Iron condor / spread</div><div class="gl-def">Defined-risk option structures the IV-rank strategy sells (condor / bull-put spread) or buys (straddle).</div></div>
+  </div>
+
+  <div class="gl-sec">
+    <h3>Exits, risk &amp; portfolio</h3>
+    <div class="gl-row"><div class="gl-term">TP / SL</div><div class="gl-def">Take-Profit / Stop-Loss on the option's value. HFT uses asymmetric +100% / −20% — let winners run, cut losers fast.</div></div>
+    <div class="gl-row"><div class="gl-term">Trailing stop</div><div class="gl-def">A stop that ratchets up as the trade gains, locking in profit.</div></div>
+    <div class="gl-row"><div class="gl-term">Scale-out</div><div class="gl-def">Closing part of a position at a target while letting the rest run.</div></div>
+    <div class="gl-row"><div class="gl-term">Day vs Swing</div><div class="gl-def">≤1-DTE = day trade; multi-day hold = swing. They get separate position budgets.</div></div>
+    <div class="gl-row"><div class="gl-term">Correlation cluster</div><div class="gl-def">A group of correlated tickers (megacap-growth, semis, index…). The bot caps how many positions stack into one cluster.</div></div>
+    <div class="gl-row"><div class="gl-term">Drawdown governor</div><div class="gl-def">De-risks (half→quarter size) then halts new entries as equity falls from its high-water mark; plus a rolling weekly loss limit.</div></div>
+    <div class="gl-row"><div class="gl-term">High-water mark</div><div class="gl-def">The peak equity reached; drawdown is measured from it.</div></div>
+  </div>
+
+  <div class="gl-sec">
+    <h3>Data sources</h3>
+    <div class="gl-row"><div class="gl-term">Tradier</div><div class="gl-def">Broker API — account, positions, orders, quotes, option chains (with Greeks), intraday timesales. Sandbox = paper.</div></div>
+    <div class="gl-row"><div class="gl-term">yfinance</div><div class="gl-def">Free historical price data (daily + intraday) and earnings dates — used by backtests and as a fallback.</div></div>
+    <div class="gl-row"><div class="gl-term">Google News (RSS)</div><div class="gl-def">Per-ticker headline feed (News tab + news-catalyst scoring).</div></div>
+    <div class="gl-row"><div class="gl-term">SEC EDGAR (8-K)</div><div class="gl-def">Official material-event filings — the most authoritative catalyst source.</div></div>
+    <div class="gl-row"><div class="gl-term">Stocktwits</div><div class="gl-def">Retail sentiment with explicit bull/bear tags (Social tab).</div></div>
+    <div class="gl-row"><div class="gl-term">Reddit</div><div class="gl-def">Mention volume + keyword sentiment for retail buzz (Social tab).</div></div>
+    <div class="gl-row"><div class="gl-term">Wikipedia</div><div class="gl-def">S&amp;P 500 constituent list for universe building.</div></div>
+    <div class="gl-row"><div class="gl-term">Unusual Whales <span style="font-weight:400;color:var(--muted)">(optional)</span></div><div class="gl-def">Options-flow data if an API key is configured; otherwise flow signals are skipped.</div></div>
+  </div>
+</div><!-- /tab-glossary -->
+
 </div><!-- /wrap -->
 
 <!-- ════════════════════════════════════════════════════════
@@ -1044,6 +1136,20 @@ function showTab(name, btn) {
   if (name === 'strategies') renderStrategies(currentState);
   if (name === 'news')       { loadNews(); renderNews(); }
   if (name === 'social')     { loadSocial(); renderSocial(); }
+}
+
+// Glossary tab is static HTML; this just filters rows by the search box.
+function filterGlossary(q) {
+  q = (q || '').trim().toLowerCase();
+  document.querySelectorAll('#tab-glossary .gl-sec').forEach(sec => {
+    let any = false;
+    sec.querySelectorAll('.gl-row').forEach(row => {
+      const match = !q || row.textContent.toLowerCase().includes(q);
+      row.style.display = match ? '' : 'none';
+      if (match) any = true;
+    });
+    sec.style.display = any ? '' : 'none';
+  });
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -1431,6 +1537,35 @@ function renderSocial() {
            Reddit · ${rd.mentions} mention${rd.mentions===1?'':'s'} · sentiment ${(rd.score>0?'+':'')}${(rd.score||0).toFixed(2)}
            ${rd.upvotes ? ' · ' + rd.upvotes + ' upvotes' : ''}${rd.comments ? ' · ' + rd.comments + ' comments' : ''}
          </div>` : '';
+
+    // Top Reddit posts — show the actual discussion, not just counts.
+    const posts = (rd && Array.isArray(rd.top_posts)) ? rd.top_posts : [];
+    const postSent = { bullish: 'var(--green)', bearish: 'var(--red)', neutral: 'var(--muted)' };
+    const postsLine = posts.length
+      ? `<div style="margin-top:5px;display:flex;flex-direction:column;gap:3px">
+           ${posts.map(p => {
+             const t = esc(p.title || '');
+             const inner = `<span style="color:${postSent[p.sentiment] || 'var(--muted)'}">●</span> ${t}
+               <span style="color:var(--muted)">— r/${esc(p.subreddit||'')} · ⬆${p.ups||0} · 💬${p.comments||0}</span>`;
+             return `<div style="font-size:10.5px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${
+               p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${inner}</a>` : inner
+             }</div>`;
+           }).join('')}
+         </div>` : '';
+
+    // Stock snapshot — company name + price + day change.
+    const stk = s.stock || {};
+    let stockLine = '';
+    if (stk.last != null) {
+      const chg = stk.change_pct;
+      const chgCol = chg == null ? 'var(--muted)' : (chg >= 0 ? 'var(--green)' : 'var(--red)');
+      const chgStr = chg == null ? '' : ` <span style="color:${chgCol}">${chg>=0?'+':''}${chg.toFixed(2)}%</span>`;
+      const vol = stk.volume ? ` · vol ${Intl.NumberFormat('en',{notation:'compact'}).format(stk.volume)}` : '';
+      stockLine = `<div style="margin-top:3px;font-size:10.5px;color:var(--muted)">
+           ${esc(stk.name || s.ticker || '')} · <span style="color:var(--text)">$${stk.last.toFixed(2)}</span>${chgStr}${vol}
+         </div>`;
+    }
+
     return `<div class="setup-row">
       <div style="min-width:0;width:100%">
         <div class="setup-sym" style="display:flex;justify-content:space-between;align-items:center">
@@ -1439,8 +1574,10 @@ function renderSocial() {
           </span>
           <span class="badge ${netBadge[s.net_sentiment] || 'b-gray'}">${esc(s.net_sentiment || 'neutral')}</span>
         </div>
+        ${stockLine}
         ${stLine}
         ${rdLine}
+        ${postsLine}
       </div>
     </div>`;
   }).join('');
