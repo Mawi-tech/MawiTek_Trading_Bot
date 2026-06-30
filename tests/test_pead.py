@@ -173,11 +173,13 @@ def test_pead_is_a_swing_strategy():
 
 
 def test_pead_has_capital_allocation():
-    assert rm.STRATEGY_ALLOCATION_PCT.get("pead") == 0.15
-    # Five strategies (catalyst 40 / iv_rank 25 / hft 20 / pead 15 / bounce 15)
-    # deliberately sum to >1.0 — not every strategy is fully deployed at once,
-    # and the per-trade-type position caps prevent over-commitment in practice.
-    # The sum should still be sensible, not arbitrary.
+    # PEAD got the lion's share of retired catalyst's old 40% (it's the
+    # positive-EV post-earnings successor).
+    assert rm.STRATEGY_ALLOCATION_PCT.get("pead") == 0.35
+    assert "catalyst_long_call" not in rm.STRATEGY_ALLOCATION_PCT   # retired
+    # Active strategies (iv_rank 35 / hft 25 / pead 35 / bounce 15) deliberately
+    # sum to >1.0 — not every strategy is fully deployed at once, and the
+    # per-trade-type position caps prevent over-commitment in practice.
     s = sum(rm.STRATEGY_ALLOCATION_PCT.values())
     assert 1.0 <= s <= 1.5
 
