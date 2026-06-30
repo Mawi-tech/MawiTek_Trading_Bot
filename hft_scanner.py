@@ -48,7 +48,7 @@ DEFAULT_PERIOD      = "1d"      # How far back to pull (intraday max 7d)
 ORB_MINUTES         = 15        # Opening range window in minutes
 VWAP_VOL_MULT       = 2.0       # Min vol multiplier for VWAP reclaim signal
 SPIKE_VOL_MULT      = 3.0       # Min vol multiplier for raw spike signal
-MIN_SIGNAL_SCORE    = 45        # Minimum score to include in output (50→45 Jun 2026 — trade-frequency push)
+MIN_SIGNAL_SCORE    = 50        # Minimum score to include in output (45→50 Jun 30 2026 — reverted the frequency push; theta-honest 2-sample backtest validated 50)
 UNIVERSE_LIMIT      = 250       # Symbols to scan per cycle (wider = more setups)
 MIN_PRICE           = 5.0       # Skip penny stocks
 MIN_AVG_VOLUME      = 1_000_000 # Liquidity floor (daily avg shares)
@@ -60,14 +60,16 @@ MIN_DOLLAR_VOLUME   = 20_000_000   # cut micro-caps / thin names (matches the un
 #   Jun 2026 backtests: a floor of 3 was positive on two independent samples
 #   (PF ~1.6); a floor of 2 was positive on one sample but negative on the
 #   other (mixed evidence, not strictly a loser).
-#   Jun 10 2026 LIVE finding: with the floor at 3 the scanner produced ~1
-#   setup per DAY (871 consecutive zero-setup scans) — the bot effectively
-#   never day-trades. Per user decision, frequency wins: floor lowered to 2,
-#   with the existing risk rails as the safety net — setups without the
-#   proven VWAP+ORB+Spike trio are "relaxed" conviction and trade at HALF
-#   size (HFT_SIZE_PCT_RELAXED), plus the tight -20% stop and daily-loss halt.
+#   Jun 10 2026: floor lowered to 2 for trade frequency (at 3 the scanner found
+#   ~1 setup/day). But live results at 2 were negative (15% win, theta bleed on
+#   0-DTE), and the Jun 30 THETA-HONEST backtest (full BS pricing, real time
+#   decay) showed 2/45 is OVERFIT: +$996 on mega-caps but -$219 on a broad
+#   basket, driven by unreliable "relaxed" (non-proven-trio) trades. At 3/50 the
+#   strategy is positive on BOTH samples (mega +$747 PF 1.51 / broad +$238 PF
+#   1.12). So frequency was a false economy — floor restored to 3.
+#   Tradeoff accepted: 3 trades less often but with a real, robust edge.
 # RE-RUN backtest_hft.py after changing this to validate.
-HFT_MIN_CONFLUENCE  = 2
+HFT_MIN_CONFLUENCE  = 3
 RANGE_LOOKBACK      = 12        # bars for the intraday range-breakout trigger (12×5m = 1h)
 
 # Bidirectional (long + short) signal generation.
