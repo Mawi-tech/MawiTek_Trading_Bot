@@ -76,6 +76,7 @@ Still referenced in the Decision Log for historical trades.
 | **ATM** | At-The-Money — strike ≈ the current stock price. |
 | **Delta / Gamma / Theta / Vega** | Option "Greeks": sensitivity to price (Δ), to Δ itself (Γ), to time decay (Θ, the daily bleed), and to IV changes (V). |
 | **Iron condor / Bull-put spread / Straddle** | Defined-risk option structures the IV-rank strategy sells (condor/spread) or buys (straddle). |
+| **Bear-call spread** | The bearish mirror of the bull-put: sell an OTM call above the market, buy a higher call for protection, keep the credit if the stock stays flat or falls. The IV-rank fallback when the market is weak (gated behind `ENABLE_BEAR_CALL` until its backtest passes). |
 
 ---
 
@@ -92,6 +93,8 @@ Still referenced in the Decision Log for historical trades.
 | **Drawdown governor** | Protects profits: de-risks (half→quarter size) then halts new entries as equity falls from its high-water mark; also a rolling weekly loss limit. |
 | **Daily loss limit / halt** | Stops new entries for the day if the account is down past a threshold. |
 | **High-water mark (HWM)** | The peak equity reached; drawdown is measured from it. |
+| **Bear-market throttle** | In a confirmed bear regime (SPY < 200-day SMA), new trades get half budget and fewer slots; small/micro tiers pause new long entries outright (`bear_pause_longs`). |
+| **Red-day gate** | The intraday version of the bear throttle: SPY down ≥0.75% today halves new long budgets ("weak"); down ≥1.5% pauses new long entries ("red") until SPY recovers above −0.4%. Catches the sharp red session a once-a-day regime check can't see. |
 
 ---
 

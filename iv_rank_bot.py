@@ -87,8 +87,27 @@ IVR_MIN_DTE_EXIT    = 7      # Force-close any IV-rank position with <= this man
 # Sell-premium structure preference. An iron condor (sell an OTM put spread AND
 # an OTM call spread) is delta-neutral and collects premium from both sides, so
 # it's preferred over a one-sided bull-put spread when both wings are available.
-# Falls back to the bull-put spread automatically if the call wing can't be built.
+# Falls back to a one-sided vertical automatically if the condor can't be built —
+# and the FALLBACK DIRECTION is market-aware: a bull-put spread is a bullish
+# position (it loses exactly on red days), so when the market is weak
+# (market_regime.is_market_weak: bear regime OR SPY red intraday) the fallback
+# is a BEAR-CALL spread above the market instead. If the bear-call can't be
+# built on a weak day, we place NOTHING rather than the bullish bull-put.
 PREFER_IRON_CONDOR  = True
+
+# Bear-call credit spread (the bearish half of the condor, stand-alone).
+# GO-LIVE GATE: stays False until backtest_iv_rank_directional.py validates the
+# bear-call side on two independent samples (repo rule — see ARCHITECTURE §1).
+# While False, a weak-market fallback simply skips rather than trade bullish.
+# NOTE: the earlier rejected bear-call experiment (backtest_bear_call.py) tested
+# this structure on the PEAD down-gap drift signal; this one rides the validated
+# IV-rank premium-selling entry instead — a different edge, revalidated on its own.
+ENABLE_BEAR_CALL      = False
+BC_SHORT_DELTA_TARGET = 0.30          # pick the call nearest this |delta|...
+BC_SHORT_DELTA_BAND   = (0.20, 0.35)  # ...within this band (≈65–80% POP short strike)
+BC_SHORT_OTM_FALLBACK = 1.05          # no greeks on the chain → short ~5% OTM
+BC_LONG_OTM           = 1.10          # protective long call ~10% OTM (defines risk)
+BC_MIN_CREDIT_FRAC    = 0.20          # require credit ≥ 20% of width, else skip
 
 # Entry-leg limit price buffer. Legs used to be priced EXACTLY at mid, and in
 # practice those orders sat unfilled for the whole 30s window and got cancelled
@@ -403,12 +422,31 @@ def select_credit_spread_legs(
             condor = _select_iron_condor(chain, stock_price, target_exp, dte)
             if condor:
                 return condor
-            # else fall through to the one-sided bull-put spread
+            # else fall through to a one-sided vertical, direction chosen below
+        if _market_is_weak():
+            # Weak/red market: a bull-put is the WRONG one-sided position — it
+            # loses exactly when the tape keeps falling. Sell the call side
+            # instead (if validated+enabled), or stand aside entirely.
+            if ENABLE_BEAR_CALL:
+                return _select_bear_call_spread(chain, stock_price, target_exp, dte)
+            print(f"[IVRank] {ticker}: market weak — skipping bull-put fallback "
+                  f"(bear-call not enabled)")
+            return None
         return _select_bull_put_spread(chain, stock_price, target_exp, dte)
     elif signal == "buy_premium":
         return _select_long_straddle(chain, stock_price, target_exp, dte)
 
     return None
+
+
+def _market_is_weak() -> bool:
+    """Fail-open wrapper around market_regime.is_market_weak() — a data problem
+    must never block the (validated) default bull-put path, so errors → False."""
+    try:
+        from market_regime import is_market_weak
+        return bool(is_market_weak())
+    except Exception:
+        return False
 
 
 def _select_bull_put_spread(
@@ -473,6 +511,104 @@ def _select_bull_put_spread(
 
     return {
         "strategy":      "bull_put_spread",
+        "expiration":    expiration,
+        "dte":           dte,
+        "sell_leg":      sell_leg,
+        "buy_leg":       buy_leg,
+        "sell_strike":   sell_strike,
+        "buy_strike":    buy_strike,
+        "net_credit":    net_credit,
+        "max_risk":      max_risk,
+        "sell_symbol":   sell_leg.get("symbol"),
+        "buy_symbol":    buy_leg.get("symbol"),
+    }
+
+
+def _select_bear_call_spread(
+    chain: list[dict],
+    stock_price: float,
+    expiration: str,
+    dte: int,
+) -> dict | None:
+    """
+    Bear-call credit spread: sell an OTM call above the market, buy a higher
+    call for protection. Profits if the stock stays flat or falls — the bearish
+    mirror of the bull-put spread, for weak/red markets.
+
+    Short strike by delta when the chain has greeks: the call nearest
+    BC_SHORT_DELTA_TARGET inside BC_SHORT_DELTA_BAND (≈65–80% chance it expires
+    worthless). Without greeks, ~5% OTM like the condor's call wing. Protection
+    ~10% OTM. Skips unless credit ≥ BC_MIN_CREDIT_FRAC of the width.
+    """
+    calls = [c for c in chain if c.get("option_type") == "call"]
+    if not calls:
+        return None
+
+    def _liquid(legs: list[dict]) -> list[dict]:
+        return [
+            c for c in legs
+            if int(c.get("open_interest", 0) or 0) >= MIN_OI_PER_LEG
+            and float(c.get("bid", 0) or 0) > 0
+            and float(c.get("ask", 0) or 0) > 0
+            and _spread_quality(float(c.get("bid", 0)), float(c.get("ask", 0))) <= MAX_SPREAD_PCT
+        ]
+
+    candidates = _liquid(calls)
+    if not candidates:
+        return None
+
+    def _delta(leg: dict) -> float | None:
+        g = leg.get("greeks") or {}
+        try:
+            d = float(g.get("delta"))
+        except (TypeError, ValueError):
+            return None
+        return abs(d) if np.isfinite(d) else None
+
+    lo, hi = BC_SHORT_DELTA_BAND
+    in_band = [
+        c for c in candidates
+        if float(c.get("strike", 0)) > stock_price
+        and (d := _delta(c)) is not None and lo <= d <= hi
+    ]
+    if in_band:
+        sell_leg = min(in_band, key=lambda c: abs(_delta(c) - BC_SHORT_DELTA_TARGET))
+    else:
+        # No usable greeks (or nothing in the band) → %-OTM placement, same as
+        # the condor's call wing.
+        sell_leg = min(candidates,
+                       key=lambda c: abs(float(c.get("strike", 0)) - stock_price * BC_SHORT_OTM_FALLBACK))
+
+    buy_leg = min(candidates,
+                  key=lambda c: abs(float(c.get("strike", 0)) - stock_price * BC_LONG_OTM))
+
+    sell_strike = float(sell_leg.get("strike", 0))
+    buy_strike  = float(buy_leg.get("strike", 0))
+    if sell_strike >= buy_strike:
+        return None  # inverted / same strike — no defined-risk spread
+
+    sell_mid = (float(sell_leg.get("bid", 0)) + float(sell_leg.get("ask", 0))) / 2
+    buy_mid  = (float(buy_leg.get("bid", 0))  + float(buy_leg.get("ask", 0)))  / 2
+    net_credit = round(sell_mid - buy_mid, 2)
+    if net_credit <= 0:
+        return None
+
+    width = buy_strike - sell_strike
+    if net_credit < width * BC_MIN_CREDIT_FRAC:
+        return None  # not being paid enough for the risk
+    max_risk = round((width - net_credit) * 100, 2)
+    if max_risk <= 0:
+        return None  # credit ≥ width → bad/stale quotes
+
+    print(
+        f"[IVRank] Bear-call spread | "
+        f"Sell ${sell_strike}C / Buy ${buy_strike}C | "
+        f"Exp: {expiration} | DTE: {dte} | "
+        f"Credit: ${net_credit:.2f} | Max risk: ${max_risk:.2f}"
+    )
+
+    return {
+        "strategy":      "bear_call_spread",
         "expiration":    expiration,
         "dte":           dte,
         "sell_leg":      sell_leg,
@@ -665,6 +801,8 @@ def execute_iv_rank_trade(setup: dict) -> bool:
 
     if strategy == "bull_put_spread":
         return _execute_bull_put(ticker, legs, budget)
+    elif strategy == "bear_call_spread":
+        return _execute_bear_call(ticker, legs, budget)
     elif strategy == "iron_condor":
         return _execute_iron_condor(ticker, legs, budget)
     elif strategy == "long_straddle":
@@ -675,15 +813,30 @@ def execute_iv_rank_trade(setup: dict) -> bool:
 
 def _execute_bull_put(ticker: str, legs: dict, budget: float) -> bool:
     """Place sell + buy legs for a bull-put credit spread."""
+    return _execute_credit_vertical(ticker, legs, budget, opt_type="put")
+
+
+def _execute_bear_call(ticker: str, legs: dict, budget: float) -> bool:
+    """Place sell + buy legs for a bear-call credit spread."""
+    return _execute_credit_vertical(ticker, legs, budget, opt_type="call")
+
+
+def _execute_credit_vertical(ticker: str, legs: dict, budget: float, opt_type: str) -> bool:
+    """
+    Place the two legs of a defined-risk credit vertical (bull-put or
+    bear-call — mechanically identical, only the option type differs).
+    """
     max_risk_per_contract = legs["max_risk"]
     if max_risk_per_contract <= 0:
         return False
 
     quantity = max(1, int(budget // max_risk_per_contract))
+    label  = legs["strategy"].replace("_", "-").replace("-spread", " spread")
+    suffix = "P" if opt_type == "put" else "C"
 
     # Buy the protection leg FIRST. Ordering matters for a credit spread: if
     # we sold first and the buy failed, we'd be left holding a naked short.
-    # Buying first means the worst case is an unused long put, not naked risk.
+    # Buying first means the worst case is an unused long option, not naked risk.
     buy_mid = round(
         (float(legs["buy_leg"].get("bid", 0)) +
          float(legs["buy_leg"].get("ask", 0))) / 2, 2
@@ -722,10 +875,10 @@ def _execute_bull_put(ticker: str, legs: dict, budget: float) -> bool:
         timeout=30.0,
     )
     if not sell_fill.ok or sell_fill.filled_qty <= 0:
-        # The credit leg didn't fill — we hold a long put we didn't want.
+        # The credit leg didn't fill — we hold a long option we didn't want.
         # Flag loudly; reconciliation will surface it on the dashboard.
         print(f"[IVRank] WARNING: sell leg did not fill ({sell_fill.reason}). "
-              f"Holding {spread_qty} long ${legs['buy_strike']}P — review and close if undesired.")
+              f"Holding {spread_qty} long ${legs['buy_strike']}{suffix} — review and close if undesired.")
         return False
 
     record_trade(ticker)
@@ -737,7 +890,7 @@ def _execute_bull_put(ticker: str, legs: dict, budget: float) -> bool:
     _add_iv_position({
         "id":           uuid.uuid4().hex[:12],
         "ticker":       ticker,
-        "strategy":     "bull_put_spread",
+        "strategy":     legs["strategy"],
         "expiration":   legs["expiration"],
         "quantity":     int(sell_fill.filled_qty),
         "entry_time":   now_est().isoformat(),
@@ -746,15 +899,15 @@ def _execute_bull_put(ticker: str, legs: dict, budget: float) -> bool:
         "setup_score":  legs.get("setup_score"),
         "legs": [
             {"symbol": legs["sell_symbol"], "side": "short", "strike": legs["sell_strike"],
-             "type": "put", "entry_price": float(sell_fill.avg_fill_price)},
+             "type": opt_type, "entry_price": float(sell_fill.avg_fill_price)},
             {"symbol": legs["buy_symbol"], "side": "long", "strike": legs["buy_strike"],
-             "type": "put", "entry_price": float(buy_fill.avg_fill_price)},
+             "type": opt_type, "entry_price": float(buy_fill.avg_fill_price)},
         ],
     })
 
     print(
-        f"[IVRank] [OK] Bull-put spread filled | {ticker} | "
-        f"${legs['sell_strike']}P / ${legs['buy_strike']}P | "
+        f"[IVRank] [OK] {label.capitalize()} filled | {ticker} | "
+        f"${legs['sell_strike']}{suffix} / ${legs['buy_strike']}{suffix} | "
         f"x{sell_fill.filled_qty} | Credit: ${entry_credit:.2f}/contract"
     )
     return True
@@ -1020,10 +1173,10 @@ def monitor_iv_rank_positions() -> None:
     print(f"[IVRank] Monitoring {len(positions)} open IV-rank position(s)...")
     for pos in list(positions):
         try:
-            # Iron condors share the credit-based exit logic with bull-put
-            # spreads (both are defined-risk credit positions managed by % of
-            # the credit / DTE).
-            if pos["strategy"] in ("bull_put_spread", "iron_condor"):
+            # Iron condors and bear-call spreads share the credit-based exit
+            # logic with bull-put spreads (all are defined-risk credit
+            # positions managed by % of the credit / DTE).
+            if pos["strategy"] in ("bull_put_spread", "bear_call_spread", "iron_condor"):
                 exit_now, reason = _spread_exit_decision(pos)
             elif pos["strategy"] == "long_straddle":
                 exit_now, reason = _straddle_exit_decision(pos)
@@ -1118,10 +1271,10 @@ def _compute_iv_pnl(pos: dict, exit_prices: dict) -> tuple[float, float, float, 
     structure (a credit spread profits when bought back below the credit).
     """
     qty = int(pos["quantity"])
-    if pos["strategy"] in ("bull_put_spread", "iron_condor"):
+    if pos["strategy"] in ("bull_put_spread", "bear_call_spread", "iron_condor"):
         # Credit structures (1 or 2 short legs): cost to close = Σ short exits −
-        # Σ long exits. Profit = credit received − cost to close. Works for both
-        # a vertical and a 4-leg condor.
+        # Σ long exits. Profit = credit received − cost to close. Works for any
+        # vertical (put or call side) and a 4-leg condor.
         credit = float(pos.get("entry_credit", 0) or 0)
         cost_to_close = sum(exit_prices.get(l["symbol"], 0.0) for l in pos["legs"] if l["side"] == "short") \
             - sum(exit_prices.get(l["symbol"], 0.0) for l in pos["legs"] if l["side"] == "long")

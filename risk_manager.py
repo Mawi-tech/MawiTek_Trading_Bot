@@ -64,6 +64,22 @@ LONG_DIRECTIONAL_STRATEGIES = {"catalyst_long_call", "pead"}
 # bounce is the bot's bear-market offense; throttling it would defeat the purpose.
 BEAR_THROTTLE_EXEMPT = {"bounce"}
 
+# ── Intraday red-day gate ───────────────────────────────────────────────────────
+# The bear throttle above reads a once-a-day regime (SPY vs 200d SMA), so a sharp
+# red session INSIDE a bull regime gets zero protection — the long-biased
+# strategies keep buying at full size into a falling tape all day. This gate reads
+# SPY's live intraday % change (market_regime.intraday_market_status, TTL-cached,
+# ~one quote per 10 min) and de-risks NEW long entries while the day is red:
+#   "weak" (SPY <= -0.75%) → halve the per-trade budget
+#   "red"  (SPY <= -1.50%) → refuse new entries from the gated strategies
+# Hysteresis in the detector keeps the gate from flapping; a genuine recovery
+# (above -0.40%) un-gates the rest of the day. Fails OPEN like the bear throttle.
+# hft_intraday is gated too: it runs long-only in production (bidirectional
+# signals are disabled), so on a red day its momentum longs bleed the same way.
+RED_DAY_GATE             = True    # master switch
+RED_DAY_SIZE_MULT        = 0.5     # "weak" tape: halve the per-trade budget
+RED_DAY_GATED_STRATEGIES = LONG_DIRECTIONAL_STRATEGIES | {"hft_intraday"}
+
 # ── Drawdown governor (protect profits from a slow bleed) ───────────────────────
 # The daily-loss halt (above) resets every midnight, so a grind of small daily
 # losses walks straight through it — e.g. the account fell ~17% over a month with
@@ -774,9 +790,47 @@ def _bear_throttle(strategy: str | None, equity: float = 0.0) -> tuple[float, fl
         return 1.0, 1.0, None
 
     reject = None
-    if BEAR_PAUSE_LONGS and strategy in LONG_DIRECTIONAL_STRATEGIES:
+    # Pause new longs if configured globally (module constant) OR by the active
+    # tier — small/micro tiers pause outright (they can't absorb even half-size
+    # bleed) while standard keeps the de-risk-only default.
+    pause_longs = BEAR_PAUSE_LONGS or bool(cfg and cfg.get("bear_pause_longs"))
+    if pause_longs and strategy in LONG_DIRECTIONAL_STRATEGIES:
         reject = "Bear regime — new long-directional entries paused (SPY < 200d SMA)"
     return BEAR_SIZE_MULT, BEAR_POSITION_MULT, reject
+
+
+def _red_day_throttle(strategy: str | None) -> tuple[float, str | None]:
+    """
+    Intraday red-day adjustment for NEW long entries.
+
+    Returns (size_mult, reject_reason):
+      • normal / unknown tape, gate off, or an ungated strategy → (1.0, None).
+      • "weak" tape → (RED_DAY_SIZE_MULT, None) — halve the budget.
+      • "red" tape  → (0.0, reject) — no new entries from the gated strategies
+        until SPY recovers (hysteresis lives in market_regime.classify_red_day).
+
+    Only RED_DAY_GATED_STRATEGIES are affected: iv_rank picks its own spread
+    direction from the same signal (weak → bear-call, not bull-put), and bounce
+    is the bear offense — a red day is exactly when it hunts. Fails OPEN, and the
+    status read is TTL-cached, so this costs ~one SPY quote per 10 minutes.
+    """
+    if (not RED_DAY_GATE or strategy not in RED_DAY_GATED_STRATEGIES
+            or strategy in BEAR_THROTTLE_EXEMPT):
+        return 1.0, None
+    try:
+        from market_regime import intraday_market_status
+        status = intraday_market_status()
+    except Exception:
+        return 1.0, None
+
+    state = status.get("state")
+    if state == "red":
+        chg = status.get("spy_chg_pct")
+        chg_txt = f"SPY {chg:+.2f}%" if chg is not None else "SPY deeply red"
+        return 0.0, f"Red day — {chg_txt} intraday, new long entries paused until recovery"
+    if state == "weak":
+        return RED_DAY_SIZE_MULT, None
+    return 1.0, None
 
 
 # ─── Drawdown governor ───────────────────────────────────────────────────────────
@@ -1006,6 +1060,15 @@ def pre_trade_check(ticker: str, strategy: str | None = None) -> dict:
     if regime_reject:
         return _reject(regime_reject, equity=equity, budget=0, pnl=daily_pnl)
 
+    # Intraday red-day gate — the acute version of the bear throttle: throttle or
+    # pause new long entries while SPY is meaningfully red RIGHT NOW. Composed
+    # with min(), not a product: both gates measure the same phenomenon (broad-
+    # market weakness) at two timescales, so multiplying would double-count it.
+    red_mult, red_reject = _red_day_throttle(strategy)
+    if red_reject:
+        return _reject(red_reject, equity=equity, budget=0, pnl=daily_pnl)
+    size_mult = min(size_mult, red_mult)
+
     # Drawdown governor — protect profits from a slow multi-day bleed the daily
     # halt misses. De-risks new entries as equity falls from its peak, then halts
     # them past the hard limit. Bounce (bear-market offense) is exempt, same as
@@ -1069,7 +1132,7 @@ def pre_trade_check(ticker: str, strategy: str | None = None) -> dict:
         f"Equity: ${equity:,.2f} | Budget: ${budget:,.2f} | "
         f"Daily P&L: ${daily_pnl:,.2f} | {trade_type.capitalize()} positions: {type_count}/{type_cap}"
         + (f" | Strategy: {strategy}" if strategy else "")
-        + (" | ⚠ BEAR throttle" if size_mult < 1.0 else "")
+        + (" | ⚠ RED-day throttle" if red_mult < 1.0 else (" | ⚠ BEAR throttle" if size_mult < 1.0 else ""))
         + (f" | ⚠ drawdown ×{dd_mult:.2f}" if dd_mult < 1.0 else "")
         + (f" | ⚠ IV-rich size ×{iv_mult:.1f}" if iv_mult < 1.0 else "")
     )
