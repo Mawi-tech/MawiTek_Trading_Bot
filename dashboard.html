@@ -1743,7 +1743,8 @@ const STRATEGY_INFO = {
   },
 };
 // IV-rank records its closed trades under the structure name — map back to the key.
-const STRAT_ALIASES = { bull_put_spread: 'iv_rank', iron_condor: 'iv_rank',
+const STRAT_ALIASES = { bull_put_spread: 'iv_rank', bear_call_spread: 'iv_rank',
+                        iron_condor: 'iv_rank',
                         iron_butterfly: 'iv_rank', long_straddle: 'iv_rank' };
 const canonStrat = v => STRAT_ALIASES[v] || v;
 
@@ -1843,15 +1844,20 @@ function renderStrategies(s) {
     }
   }
 
-  // Header: market-regime pill
+  // Header: market-regime pill (daily regime + intraday red-day state)
   const reg = sp.regime || { state: 'unknown', detail: '' };
   const rp  = document.getElementById('regimePill');
   if (rp) {
-    const m = { bull: ['dot-green', 'Bull market'], bear: ['dot-red', 'Bear market'],
-                unknown: ['dot-gray', 'Regime —'] }[reg.state] || ['dot-gray', 'Regime —'];
+    let m = { bull: ['dot-green', 'Bull market'], bear: ['dot-red', 'Bear market'],
+              unknown: ['dot-gray', 'Regime —'] }[reg.state] || ['dot-gray', 'Regime —'];
+    let title = reg.detail || 'Market regime';
+    // A red/weak intraday tape overrides the pill color — that's the acute risk.
+    if (reg.intraday === 'red')       m = ['dot-red',    m[1] + ' · RED day'];
+    else if (reg.intraday === 'weak') m = ['dot-amber', m[1] + ' · weak day'];
+    if (reg.intraday_detail) title += ' | ' + reg.intraday_detail;
     rp.querySelector('.dot').className = 'dot ' + m[0];
     rp.querySelector('span:last-child').textContent = m[1];
-    rp.title = reg.detail || 'Market regime';
+    rp.title = title;
   }
 
   // Header: systems-health pill

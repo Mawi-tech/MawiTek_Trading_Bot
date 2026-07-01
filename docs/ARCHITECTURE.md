@@ -33,7 +33,7 @@ guard and heartbeat):
 | Process | File | Role |
 |---|---|---|
 | Strategy 1 — Catalyst | `executor.py` | Long calls **into** an earnings/news catalyst (7–30 DTE) |
-| Strategy 2 — IV-Rank | `iv_rank_bot.py` | Premium **selling** — bull-put spreads & iron condors |
+| Strategy 2 — IV-Rank | `iv_rank_bot.py` | Premium **selling** — iron condors & market-aware verticals (bull-put / bear-call) |
 | Strategy 3 — HFT | `hft_executor.py` | Intraday 0-DTE momentum scalps |
 | Strategy 4 — PEAD | `pead_executor.py` | Post-earnings / news-drift swings (14–35 DTE) |
 | Strategy 5 — Bounce | `bounce_executor.py` | Bear-regime capitulation-bounce longs |
@@ -56,11 +56,17 @@ is priced (see `backtest.py`) — it fights vega into the print. Kept for comple
 the real premium edge is Strategy 2.
 
 ### Strategy 2 — IV-Rank premium selling (`iv_rank_bot.py`)
-Sells defined-risk premium when implied vol is rich. Preferred structure is a **4-leg iron condor**
-(falls back to a **bull-put spread** if the call wing can't be built). Buys the long protection wing(s)
-**first** (no naked-short risk on a partial fill), then sells the short leg(s). Own multi-leg book
-(`iv_rank_positions.json`). Exits: take profit at **50% of credit captured**, stop at **2× credit**,
-or time-stop at **≤7 DTE**. This is the validated short-vol edge (backtested PF and win-rate positive).
+Sells defined-risk premium when implied vol is rich. Preferred structure is a **4-leg iron condor**;
+the one-sided vertical fallback is **market-aware**: a bull-put spread in a healthy market, a
+**bear-call spread** (short ~0.30-delta call / long ~10%-OTM call, credit ≥ 20% of width) when
+`market_regime.is_market_weak()` — bear regime or a weak/red intraday tape. On a weak day where the
+bear-call can't be built, it places **nothing** rather than the bullish bull-put. The bear-call side is
+gated behind `ENABLE_BEAR_CALL` (off until `backtest_iv_rank_directional.py` passes on two independent
+samples — until then a weak-day fallback simply skips). Buys the long protection wing(s) **first** (no
+naked-short risk on a partial fill), then sells the short leg(s). Own multi-leg book
+(`iv_rank_positions.json`). Exits (all credit structures share them): take profit at **50% of credit
+captured**, stop at **2× credit**, or time-stop at **≤7 DTE**. This is the validated short-vol edge
+(backtested PF and win-rate positive).
 
 ### Strategy 3 — HFT intraday scalps (`hft_executor.py`, `hft_scanner.py`)
 Trades 0–2 DTE options on intraday momentum during the **09:45–14:45 ET** prime window, flat by EOD
@@ -121,10 +127,15 @@ strongly in bear samples, disastrous in bull, so it is hard-gated by `market_reg
 
 ### 4.3 Risk, regime & exits
 - **`risk_manager.py`** — the central gate. `pre_trade_check(ticker, strategy)` runs, in order:
-  daily-loss halt → duplicate-position guard → concentration cap → net-vega cap → per-strategy allocation
-  clamp → bear throttle → IV-aware sizing → final budget & contract count. Equations in §5.1–5.5.
+  daily-loss halt → bear throttle → intraday red-day gate → drawdown governor → duplicate-position guard →
+  concentration cap → net-vega cap → per-strategy allocation clamp → IV-aware sizing → final budget &
+  contract count. Equations in §5.1–5.5.
 - **`market_regime.py`** — single source of truth for bull/bear (SPY vs 200-day SMA), one fetch/ET-day,
-  shared by the throttle, the PEAD/bounce gates, and the dashboard.
+  shared by the throttle, the PEAD/bounce gates, and the dashboard. Also owns the **intraday red-day
+  detector** (`classify_red_day` pure + `intraday_market_status` TTL-cached live read, ~one SPY quote per
+  10 min): SPY ≤ −0.75% intraday = "weak", ≤ −1.50% = "red", with hysteresis (a tripped day stays at least
+  "weak" until SPY recovers above −0.40%). `is_market_weak()` (bear regime OR weak/red tape) is the
+  direction signal for the iv_rank credit-spread fallback.
 - **`exit_manager.py`** — shared, pure trailing-stop + scale-out helpers (§5.10).
 - **`portfolio_greeks.py`** — net book Δ/Γ/Θ/V aggregation (§5.9), cached for the risk manager's vega cap.
 
@@ -202,9 +213,13 @@ strongly in bear samples, disastrous in bull, so it is hard-gated by `market_reg
   sandbox (place → confirm → record → close → reconcile), gated behind explicit `--run` confirmation.
 
 ### 4.9 Backtests (research scripts — not on the live path, untested)
-`backtest.py` (catalyst, honest IV-crush model), `backtest_hft.py`, `backtest_iv_rank.py`, `backtest_pead.py`,
-`backtest_bounce.py`, plus the "rejected experiment" tools `backtest_crush.py`, `backtest_bear_call.py`,
-`backtest_orb.py`, `backtest_vwap_bounce.py`. They share a Black-Scholes pricing core (§5.15). **Intentionally
+`backtest.py` (catalyst, honest IV-crush model), `backtest_hft.py`, `backtest_iv_rank.py`,
+`backtest_iv_rank_directional.py` (the `ENABLE_BEAR_CALL` go-live gate: A/Bs the market-aware
+bull-put/bear-call fallback against the always-bull-put baseline on the same signals — its docstring
+carries the two-sample acceptance criteria), `backtest_pead.py`,
+`backtest_bounce.py`, plus the "rejected experiment" tools `backtest_crush.py`, `backtest_bear_call.py`
+(bear-calls on the PEAD drift signal — the *signal* was the rejection, which is why the IV-rank-signal
+retry above gets its own gate), `backtest_orb.py`, `backtest_vwap_bounce.py`. They share a Black-Scholes pricing core (§5.15). **Intentionally
 left duplicated** rather than consolidated: they are untested dev tools that have diverged in small tuned ways
 (e.g. price floors), so merging them would risk silently changing research results with no test to catch it.
 
@@ -235,14 +250,25 @@ Each ticker maps to a `CORRELATION_GROUP` (megacap_growth, semis, software, inde
 rejected if its group already holds `MAX_POSITIONS_PER_GROUP` (3) names across **all** strategy books — so
 "5 different tech names" can't masquerade as diversification.
 
-### 5.4 Bear-market throttle (`_bear_throttle`)
+### 5.4 Bear-market throttle (`_bear_throttle`) & intraday red-day gate (`_red_day_throttle`)
 In a bear regime (and unless the strategy is exempt):
 ```
 budget  ×= BEAR_SIZE_MULT        # 0.5  — halve per-trade budget
 cap     ×= BEAR_POSITION_MULT    # 0.6  — shrink the position-count cap
-# optional: pause new long-directional entries entirely (BEAR_PAUSE_LONGS)
+# optional: pause new long-directional entries entirely (bear_pause_longs —
+# tier-configurable: OFF for standard, ON for small/micro)
 ```
-Fails **open** (no-op) if the regime can't be read.
+The bear regime is a once-a-day figure, so a sharp red session inside a bull regime used to get zero
+protection. The **red-day gate** covers that window for the gated strategies (long-directional +
+hft_intraday, which runs long-only):
+```
+"weak" (SPY ≤ −0.75% intraday) → budget ×= RED_DAY_SIZE_MULT (0.5)
+"red"  (SPY ≤ −1.50% intraday) → reject new entries until SPY recovers (> −0.40%)
+```
+The two size multipliers compose with **min()**, not a product — they measure the same phenomenon at two
+timescales, so multiplying would double-count it. (The drawdown governor, which measures account health,
+stays multiplicative.) bounce is exempt from both (bear offense); iv_rank is not gated here — it picks its
+spread *direction* from the same signal instead (§3, Strategy 2). Both gates fail **open**.
 
 ### 5.5 IV-aware sizing & IV context (`_iv_size_mult`, `iv_provider`)
 Long-premium buyers (catalyst/pead/bounce) are *de-sized* — not blocked — when IV is rich, grounded in the
