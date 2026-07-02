@@ -149,9 +149,10 @@ def load_equity_curve() -> list[dict]:
         return []
 
 
-def get_baseline_equity_for_today() -> float | None:
+def get_baseline_snapshot_for_today() -> dict | None:
     """
-    Returns the most recent equity snapshot from BEFORE today.
+    Returns the most recent equity snapshot RECORD from BEFORE today (the
+    caller can inspect its "date" to detect a stale, multi-day-old baseline).
     None if there's no prior snapshot (first day of operation).
 
     "Today" is the US/Eastern trading day so daily P&L doesn't reset hours
@@ -164,8 +165,14 @@ def get_baseline_equity_for_today() -> float | None:
         # Skip non-positive equities — those are failed-read artifacts, not a
         # real baseline (defensive belt-and-braces alongside the write guard).
         if record.get("date") and record["date"] < today and equity > 0:
-            return equity
+            return record
     return None
+
+
+def get_baseline_equity_for_today() -> float | None:
+    """Equity of the most recent snapshot from before today (see above)."""
+    record = get_baseline_snapshot_for_today()
+    return float(record["equity"]) if record else None
 
 
 def _last_known_equity() -> float | None:

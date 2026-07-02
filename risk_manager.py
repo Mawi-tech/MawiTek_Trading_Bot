@@ -31,6 +31,7 @@ Daily P&L (calculate_daily_pnl):
     trip the halt mid-session.
 """
 
+import datetime
 import json
 import os
 from tradier_client import get_account_balance, get_open_positions
@@ -599,6 +600,20 @@ def count_positions_by_type(trade_type: str) -> int:
             + _count_book("bounce_positions.json", is_list=True))
 
 
+MARKET_OPEN_HOUR   = 9     # 09:30 ET — before this, option marks are unreliable
+MARKET_OPEN_MINUTE = 30
+
+
+def _previous_trading_day(day) -> "datetime.date":
+    """The weekday before `day` (Sat/Sun skipped). Holidays are NOT modeled —
+    after a Monday holiday this returns Monday, which makes the stale-baseline
+    guard below conservatively fall back to realized-only for one day."""
+    prev = day - datetime.timedelta(days=1)
+    while prev.weekday() >= 5:
+        prev -= datetime.timedelta(days=1)
+    return prev
+
+
 def calculate_daily_pnl() -> float:
     """
     True daily P&L = current mark-to-market equity − baseline equity for today.
@@ -606,23 +621,48 @@ def calculate_daily_pnl() -> float:
     Baseline = the most recent equity snapshot from a date BEFORE today
     (i.e. yesterday's close, or whenever the bot last ran).
 
-    If there's no prior snapshot (first day of operation) we return the
-    realized portion only, so the halt logic remains conservative on
-    day one.
+    Falls back to the REALIZED portion only (trades actually closed today,
+    from the journal — no open-position marks) in three cases:
+
+      1. No prior snapshot (first day of operation).
+      2. PRE-OPEN / weekend: before 09:30 ET options don't trade, so the
+         broker's marks on open spreads are stale or bid-skewed. Measured
+         against yesterday's mid-marked snapshot that reads as a phantom
+         "loss" — it once showed a third of the daily limit consumed before
+         the market even opened, and a big enough phantom would latch the
+         daily halt for the whole session.
+      3. STALE baseline: if the last snapshot is older than the previous
+         trading day (bot was off, snapshots stopped), equity-minus-baseline
+         is a MULTI-day move — presenting it as "today's" P&L overstates the
+         loss and can false-trip the halt.
+
+    Realized-only is conservative in the right direction: genuine realized
+    losses still count toward the halt, while unverifiable marks don't.
     """
     # Lazy import: equity_tracker imports position_manager which can cause
     # a cycle if imported at module load. Local import is safe.
-    from equity_tracker import get_live_equity, get_baseline_equity_for_today
+    from equity_tracker import get_live_equity, get_baseline_snapshot_for_today
     from trade_journal import get_realized_pnl_today
 
-    equity   = get_live_equity()
-    baseline = get_baseline_equity_for_today()
+    now = now_est()
+    pre_open = (now.hour, now.minute) < (MARKET_OPEN_HOUR, MARKET_OPEN_MINUTE)
+    if now.weekday() >= 5 or pre_open:
+        return get_realized_pnl_today()
 
-    if baseline is None or baseline <= 0:
+    snapshot = get_baseline_snapshot_for_today()
+    baseline = float(snapshot.get("equity", 0) or 0) if snapshot else 0.0
+    if baseline <= 0:
         # No prior baseline → fall back to realized-only (won't see open-position swings)
         return get_realized_pnl_today()
 
-    return equity - baseline
+    try:
+        baseline_date = datetime.date.fromisoformat(snapshot.get("date", ""))
+        if baseline_date < _previous_trading_day(today_est()):
+            return get_realized_pnl_today()
+    except ValueError:
+        return get_realized_pnl_today()   # unparseable date → don't trust the snapshot
+
+    return get_live_equity() - baseline
 
 
 def check_daily_loss_limit(equity: float) -> tuple[bool, float]:
