@@ -178,7 +178,10 @@ strongly in bear samples, disastrous in bull, so it is hard-gated by `market_reg
 - **`decision_log.py`** — append-only audit of every scan decision (traded / rejected / exited) with reason,
   deduped per `(ticker, strategy)`.
 - **`equity_tracker.py`** — equity snapshots to `equity_curve.json`; marks open positions to market via
-  `get_option_mid`.
+  `get_option_mid`. Daily P&L (`risk_manager.calculate_daily_pnl`) = live broker equity − the last snapshot
+  from before today, EXCEPT it falls back to realized-only (journal) P&L pre-open/weekends (option marks are
+  stale before 09:30 ET — mark-to-market there produced phantom "losses" and could latch the daily halt) and
+  when the baseline snapshot is older than the previous trading day (a multi-day move isn't "today's" loss).
 - **`heartbeat.py`** — `beat()` per loop into `heartbeats/<name>.json`; the watchdog reads these.
 - **`logger.py`** — shared logger + `log_trade`.
 - **`utils.py`** — timezone helpers (`now_est`, `today_est`, `parse_isodt` — everything trades on US/Eastern),
