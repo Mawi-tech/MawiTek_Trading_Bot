@@ -88,6 +88,11 @@ TIER_PRESETS: dict[str, dict] = {
             "bounce":             0.15,
         },
         "bear_regime_throttle":  True,
+        # In a bear regime, refuse NEW long-directional entries outright (vs just
+        # halving them). OFF for standard: PEAD is the best-validated engine and
+        # a 200d-SMA bear regime can last months — the intraday red-day gate is
+        # the acute protection instead. Small accounts flip this ON below.
+        "bear_pause_longs":      False,
         # Round a too-small budget UP to 1 contract (small accounts only). OFF
         # here so large accounts keep strict %-sizing — identical to today.
         "min_one_contract":      False,
@@ -107,6 +112,9 @@ TIER_PRESETS: dict[str, dict] = {
             "bounce":  0.25,
         },
         "bear_regime_throttle":  True,
+        # A small account can't afford even half-size bleed through a bear
+        # regime — pause new long-directional entries outright.
+        "bear_pause_longs":      True,
         "min_one_contract":      True,    # let a small account actually fill a trade
     },
     # < $5k — concentrate hard: one or two engines, a couple of slots, larger
@@ -124,6 +132,7 @@ TIER_PRESETS: dict[str, dict] = {
             "pead":    0.40,
         },
         "bear_regime_throttle":  True,
+        "bear_pause_longs":      True,   # micro: same reasoning as "small"
         "min_one_contract":      True,
     },
 }
@@ -258,6 +267,8 @@ def _clean_overrides(raw: dict) -> dict:
             clean["strategy_allocation_pct"] = al
     if "bear_regime_throttle" in raw:
         clean["bear_regime_throttle"] = bool(raw["bear_regime_throttle"])
+    if "bear_pause_longs" in raw:
+        clean["bear_pause_longs"] = bool(raw["bear_pause_longs"])
     if "min_one_contract" in raw:
         clean["min_one_contract"] = bool(raw["min_one_contract"])
     return clean
@@ -319,6 +330,8 @@ def _clamp_config(cfg: dict) -> dict:
     cfg["enabled_strategies"] = _clean_enabled(cfg.get("enabled_strategies")) or []
     cfg["strategy_allocation_pct"] = _clean_allocation(cfg.get("strategy_allocation_pct")) or {}
     cfg["bear_regime_throttle"] = bool(cfg.get("bear_regime_throttle", True))
+    # Default False = the risk_manager module-constant behavior (standard tier).
+    cfg["bear_pause_longs"] = bool(cfg.get("bear_pause_longs", False))
     cfg["min_one_contract"] = bool(cfg.get("min_one_contract", False))
     return cfg
 

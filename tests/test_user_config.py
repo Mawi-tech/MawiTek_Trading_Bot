@@ -189,6 +189,22 @@ def test_is_strategy_enabled_helper():
     assert uc.is_strategy_enabled(None, 8_000) is True     # no strategy → always ok
 
 
+# ── bear_pause_longs (tier-aware bear-regime long pause) ─────────────────────
+
+def test_bear_pause_longs_preset_defaults():
+    assert uc.TIER_PRESETS["standard"]["bear_pause_longs"] is False   # de-risk only
+    assert uc.TIER_PRESETS["small"]["bear_pause_longs"] is True
+    assert uc.TIER_PRESETS["micro"]["bear_pause_longs"] is True
+
+
+def test_bear_pause_longs_in_effective_and_overridable():
+    assert uc.effective_config(100_000)["bear_pause_longs"] is False
+    assert uc.effective_config(10_000)["bear_pause_longs"] is True
+    # Dashboard override: a standard account can opt in.
+    uc.save_user_config({"tier": "auto", "overrides": {"bear_pause_longs": 1}})
+    assert uc.effective_config(100_000)["bear_pause_longs"] is True   # bool coerced
+
+
 # ── min-one-contract sizing ──────────────────────────────────────────────────
 
 def test_min_one_contract_preset_defaults():
