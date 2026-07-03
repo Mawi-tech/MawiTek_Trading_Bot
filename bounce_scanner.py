@@ -36,7 +36,11 @@ def scan_ticker(ticker: str) -> dict | None:
     if not setup or setup.get("direction") != "bearish":
         return None
     # Re-frame the bearish down-gap as a long bounce (we buy calls on the rebound).
+    # Overwrite `direction` (not just add `trade_direction`) — alert/dashboard code
+    # reads `direction` directly, and a stale "bearish" here made a long-call setup
+    # display as a sell signal.
     setup["signal"] = "capitulation_bounce"
+    setup["direction"] = "bullish"
     setup["trade_direction"] = "bullish"
     setup["trade_style"] = "swing"      # days-long bounce hold
     setup["style_reason"] = (f"swing: bear-regime capitulation bounce — oversold "
