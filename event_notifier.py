@@ -255,6 +255,58 @@ def _dispatch(subject: str, lines: list[str], severity: str = "info",
         _send_sms(subject, body)
 
 
+# ─── Hold-duration helpers ────────────────────────────────────────────────────
+
+# Expected holding horizon per strategy, derived from each executor's actual
+# time-stop / exit rules (kept in sync with the hft/pead/bounce executors). Shown
+# on ENTRY alerts so a subscriber knows how long the trade is meant to be held;
+# on EXIT alerts we report the ACTUAL time held instead.
+STRATEGY_HORIZON = {
+    "hft_intraday":       "intraday — closed within ~60 min, flat by the bell",
+    "catalyst_long_call": "swing — a few days (catalyst plays out)",
+    "pead":               "swing — up to ~16 days (time-stop)",
+    "bounce":             "swing — up to ~9 days (time-stop)",
+}
+
+
+def hold_horizon(strategy: str, style: str = "") -> str:
+    """Human-readable expected hold for a strategy; falls back to the style."""
+    horizon = STRATEGY_HORIZON.get(strategy)
+    if horizon:
+        return horizon
+    return "intraday" if style == "day" else "swing — multiple days"
+
+
+def _format_held(entry_time, now=None) -> str:
+    """
+    Human hold duration from an ISO entry timestamp (or datetime) to `now`:
+    days once past 24h, else hours/minutes. Empty string if unparseable/missing,
+    so callers can simply omit the line. Handles both tz-aware and naive stamps.
+    """
+    import datetime as _dt
+    if not entry_time:
+        return ""
+    try:
+        et = (_dt.datetime.fromisoformat(entry_time)
+              if isinstance(entry_time, str) else entry_time)
+    except Exception:
+        return ""
+    if not isinstance(et, _dt.datetime):
+        return ""
+    if now is None:
+        now = _dt.datetime.now(et.tzinfo) if et.tzinfo else _dt.datetime.now()
+    try:
+        secs = max(0, int((now - et).total_seconds()))
+    except Exception:
+        return ""   # naive/aware mismatch or other subtraction error
+    days = secs // 86400
+    if days >= 1:
+        return f"{days}d"
+    hrs = secs // 3600
+    mins = (secs % 3600) // 60
+    return f"{hrs}h {mins}m" if hrs else f"{mins}m"
+
+
 # ─── Public event helpers ─────────────────────────────────────────────────────
 
 def notify_trade_filled(strategy: str, ticker: str, contract: str,
@@ -274,18 +326,28 @@ def notify_trade_filled(strategy: str, ticker: str, contract: str,
 
 def notify_position_closed(ticker: str, contract: str,
                            pnl_dollar: float, pnl_pct: float, reason: str,
-                           strategy: str = "") -> None:
-    """Position exited (TP, SL, expiry, manual, external)."""
+                           strategy: str = "", entry_time=None) -> None:
+    """
+    Position exited (TP, SL, expiry, time-stop, manual, external) — i.e. a SELL.
+
+    Framed as an explicit SELL so it's unmistakable in the alert stream next to
+    the scanner's BUY heads-ups. When `entry_time` is provided, reports how long
+    the position was ACTUALLY held — the companion to the expected-hold horizon
+    shown on the entry alert.
+    """
     sign     = "+" if pnl_dollar >= 0 else "-"
     severity = "success" if pnl_dollar >= 0 else "danger"
     lines    = [
         f"P&L: {sign}${abs(pnl_dollar):,.2f} ({pnl_pct:+.1f}%)",
         f"Reason: {reason}",
     ]
+    held = _format_held(entry_time)
+    if held:
+        lines.append(f"Held: {held}")
     if strategy:
         lines.append(f"Strategy: {strategy}")
     _dispatch(
-        subject  = f"Position closed — {ticker} {contract}",
+        subject  = f"SELL {ticker} {contract} — closed {pnl_pct:+.1f}%",
         lines    = lines,
         severity = severity,
         kind     = "close",
@@ -384,6 +446,7 @@ def notify_trade_setups(setups: list[dict], style: str, strategy: str,
             return 0
 
         label = "Day-trade" if style == "day" else "Swing"
+        horizon = hold_horizon(strategy, style)
         any_watch = any(w for _, w in fresh)
         lines = []
         for s, on_watch in fresh:
@@ -392,7 +455,10 @@ def notify_trade_setups(setups: list[dict], style: str, strategy: str,
                    or strategy)
             direction = f" {s.get('direction')}" if s.get("direction") else ""
             tag = "[watchlist] " if on_watch else ""
-            lines.append(f"{tag}{s['ticker']}: {s.get('setup_score')}/100{direction} — {why}")
+            # "BUY" prefix so entry alerts read unmistakably as buys, next to the
+            # SELL exit alerts from notify_position_closed.
+            lines.append(f"{tag}BUY {s['ticker']}: {s.get('setup_score')}/100{direction} — {why}")
+        lines.append(f"Expected hold: {horizon}")
         lines.append(f"Source: {strategy} scanner. Heads-up only — not an order.")
 
         subject = (f"{label} setups — {len(fresh)} new candidate(s)"

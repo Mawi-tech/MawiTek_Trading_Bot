@@ -184,6 +184,7 @@ def remove_position(
             pnl_pct    = round(pnl_pct, 1),
             reason   = exit_reason,
             strategy = data.get("strategy", "unknown"),
+            entry_time = data.get("entry_time"),
         )
     except Exception as e:
         print(f"[PositionManager] notify_position_closed failed: {e}")
