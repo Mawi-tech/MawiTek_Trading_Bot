@@ -133,6 +133,22 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-XSS-Protection", "1; mode=block")
+        # CSP backstop: the dashboards fetch only same-origin JSON and render no
+        # remote resources. Pinning to 'self' (plus the inline styles/scripts the
+        # single-file dashboard relies on) contains any content injected via an
+        # external feed — a stray script can't beacon out or load remote code.
+        # object-src 'none' + base-uri 'none' close the usual bypass gaps.
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "connect-src 'self'; "
+            "object-src 'none'; "
+            "base-uri 'none'; "
+            "frame-ancestors 'none'",
+        )
         super().end_headers()
 
     # ── Access control ──────────────────────────────────────────────────────
