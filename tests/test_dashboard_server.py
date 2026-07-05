@@ -80,6 +80,16 @@ def test_security_headers_present(server):
         assert r.headers.get("X-Frame-Options") == "DENY"
 
 
+def test_csp_header_present(server):
+    # Defense-in-depth: a CSP that pins to same-origin so injected content can't
+    # beacon out or load remote code, and object/base-uri are locked down.
+    with urllib.request.urlopen(server + "/dashboard.html", timeout=5) as r:
+        csp = r.headers.get("Content-Security-Policy", "")
+    assert "default-src 'self'" in csp
+    assert "object-src 'none'" in csp
+    assert "base-uri 'none'" in csp
+
+
 # ── POST /api/config (the only write endpoint) ───────────────────────────────
 
 def _post(url, payload, raw=None):
