@@ -1102,6 +1102,7 @@ def _close_iv_position(pos: dict, reason: str) -> bool:
             pnl_pct=round(pnl_pct, 1),
             reason=reason,
             strategy="iv_rank",
+            entry_time=pos.get("entry_time"),
         )
     except Exception as e:
         print(f"[IVRank] notify failed: {e}")
