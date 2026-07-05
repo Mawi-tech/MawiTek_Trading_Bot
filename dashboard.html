@@ -1116,6 +1116,16 @@ function esc(s) {
     .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
 }
 
+// Only allow http(s) URLs into an href. esc() escapes < > & " ' but NOT the
+// scheme, so a `javascript:` / `data:` URL from an external feed (news links,
+// Reddit posts) would survive esc() and execute same-origin JS if clicked —
+// which could reach the loopback control/config endpoints. Anything not
+// http(s) collapses to '' so the link renders inert.
+function safeUrl(u) {
+  const s = String(u == null ? '' : u).trim();
+  return /^https?:\/\//i.test(s) ? s : '';
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────
 let allSetups = [], allHistory = [], allDecisions = [];
 let setupFilter = 'all', histFilter = 'all', decFilter = 'all';
@@ -1442,8 +1452,9 @@ function renderNews() {
   listEl.innerHTML = list.slice(0, 100).map(n => {
     const senti = (n.sentiment || 0) > 0 ? '<span class="badge b-green">bullish</span>'
                 : (n.sentiment || 0) < 0 ? '<span class="badge b-red">bearish</span>' : '';
-    const title = n.url
-      ? `<a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer" style="color:var(--text);text-decoration:none">${esc(n.title)}</a>`
+    const nUrl = safeUrl(n.url);
+    const title = nUrl
+      ? `<a href="${esc(nUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--text);text-decoration:none">${esc(n.title)}</a>`
       : esc(n.title || '');
     const moreSrc = (n.source_count || 1) > 1 ? ` <span class="badge b-gray" style="font-size:9px">+${(n.source_count - 1)} more</span>` : '';
     return `<div class="setup-row">
@@ -1547,8 +1558,9 @@ function renderSocial() {
              const t = esc(p.title || '');
              const inner = `<span style="color:${postSent[p.sentiment] || 'var(--muted)'}">●</span> ${t}
                <span style="color:var(--muted)">— r/${esc(p.subreddit||'')} · ⬆${p.ups||0} · 💬${p.comments||0}</span>`;
+             const pUrl = safeUrl(p.url);
              return `<div style="font-size:10.5px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${
-               p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${inner}</a>` : inner
+               pUrl ? `<a href="${esc(pUrl)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${inner}</a>` : inner
              }</div>`;
            }).join('')}
          </div>` : '';
