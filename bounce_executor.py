@@ -306,6 +306,7 @@ def _close_position(pos: dict, reason: str, close_qty: int | None = None):
         notify_position_closed(
             ticker=underlying, contract=f"${pos.get('strike', 0):.0f}C",
             pnl_dollar=pnl_dollar, pnl_pct=pnl_pct, reason=reason, strategy="bounce",
+            entry_time=pos.get("entry_time"),
         )
     except Exception as e:
         log.warning("notify_position_closed failed: %s", e)
