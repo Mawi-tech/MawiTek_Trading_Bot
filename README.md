@@ -5,7 +5,7 @@ Multi-strategy options trading bot with a live dashboard, risk management, and b
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
 ![Tests](https://img.shields.io/badge/tests-328%20passing-brightgreen)
 ![Broker](https://img.shields.io/badge/broker-Tradier-0a7cff)
-![License](https://img.shields.io/badge/license-MIT-blue)
+![License](https://img.shields.io/badge/license-All%20Rights%20Reserved-red)
 
 > ⚠️ **Disclaimer:** Educational / personal project. Trades against the Tradier **sandbox** (paper money) by default. Options trading carries substantial risk — nothing here is financial advice. Use at your own risk.
 
@@ -304,4 +304,6 @@ Every event also lands in `events.json` so the dashboard's Strategies tab shows 
 
 ## License
 
-Released under the [MIT License](LICENSE) — free to use, modify, and distribute with attribution.
+© 2026 MawiTek. **All rights reserved.** The source is published for portfolio and
+evaluation purposes only — see [LICENSE](LICENSE). It may not be copied, modified,
+reused, redistributed, or run without prior written permission.
