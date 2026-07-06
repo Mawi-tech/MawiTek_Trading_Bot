@@ -12,9 +12,10 @@ def test_throttle_noop_in_bull(monkeypatch):
 
 
 def test_throttle_derisks_in_bear(monkeypatch):
+    # equity 100k → standard tier, whose bear_pause_longs is False.
     monkeypatch.setattr(mr, "is_bear_market", lambda: True)
     monkeypatch.setattr(rm, "BEAR_PAUSE_LONGS", False)
-    size, cap, reject = rm._bear_throttle("pead")
+    size, cap, reject = rm._bear_throttle("pead", equity=100_000)
     assert size == rm.BEAR_SIZE_MULT
     assert cap == rm.BEAR_POSITION_MULT
     assert reject is None          # de-risked, not paused
@@ -23,10 +24,23 @@ def test_throttle_derisks_in_bear(monkeypatch):
 def test_throttle_pauses_only_long_directional_when_configured(monkeypatch):
     monkeypatch.setattr(mr, "is_bear_market", lambda: True)
     monkeypatch.setattr(rm, "BEAR_PAUSE_LONGS", True)
-    assert rm._bear_throttle("pead")[2] is not None                 # long → paused
-    assert rm._bear_throttle("catalyst_long_call")[2] is not None   # long → paused
-    assert rm._bear_throttle("iv_rank")[2] is None                  # premium-sell → only de-risked
-    assert rm._bear_throttle("hft_intraday")[2] is None             # intraday → only de-risked
+    eq = 100_000
+    assert rm._bear_throttle("pead", equity=eq)[2] is not None                 # long → paused
+    assert rm._bear_throttle("catalyst_long_call", equity=eq)[2] is not None   # long → paused
+    assert rm._bear_throttle("iv_rank", equity=eq)[2] is None                  # premium-sell → only de-risked
+    assert rm._bear_throttle("hft_intraday", equity=eq)[2] is None             # intraday → only de-risked
+
+
+def test_throttle_small_tier_pauses_longs_by_default(monkeypatch):
+    # small/micro tiers set bear_pause_longs=True in their presets, so new
+    # long-directional entries pause in a bear regime even with the module
+    # constant False; standard stays de-risk-only.
+    monkeypatch.setattr(mr, "is_bear_market", lambda: True)
+    monkeypatch.setattr(rm, "BEAR_PAUSE_LONGS", False)
+    assert rm._bear_throttle("pead", equity=10_000)[2] is not None    # small → paused
+    assert rm._bear_throttle("pead", equity=2_000)[2] is not None     # micro → paused
+    assert rm._bear_throttle("pead", equity=100_000)[2] is None       # standard → de-risked
+    assert rm._bear_throttle("iv_rank", equity=10_000)[2] is None     # never pauses premium-sell
 
 
 def test_throttle_master_switch_off(monkeypatch):
