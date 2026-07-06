@@ -266,6 +266,7 @@ STRATEGY_HORIZON = {
     "catalyst_long_call": "swing — a few days (catalyst plays out)",
     "pead":               "swing — up to ~16 days (time-stop)",
     "bounce":             "swing — up to ~9 days (time-stop)",
+    "vwap_fade":          "intraday — reverts to VWAP within ~30 min, flat by the bell",
 }
 
 
@@ -279,14 +280,17 @@ def hold_horizon(strategy: str, style: str = "") -> str:
 
 # Per-strategy exit plan — mirrors each executor's TAKE_PROFIT_PCT / STOP_LOSS_PCT
 # / MAX_HOLD_* (KEEP IN SYNC if those change). Drives the concrete buy/sell/time
-# plan on entry alerts. All four entry-alert strategies are LONG CALLS. tp/sl are
-# option-premium percentages; `days` is the calendar time-stop
-# (0 = intraday/flat-by-close, None = held through the catalyst / to expiry).
+# plan on entry alerts. tp/sl are option-premium percentages; `days` is the
+# calendar time-stop (0 = intraday/flat-by-close, None = held through the
+# catalyst / to expiry). `mins` is the intraday time-stop for day strategies.
+# Most strategies are long CALLS; vwap_fade is BIDIRECTIONAL, so the plan text is
+# resolved from the setup's direction (see trade_plan).
 STRATEGY_PLAN = {
-    "hft_intraday":       {"tp": 100, "sl": 20, "days": 0},
+    "hft_intraday":       {"tp": 100, "sl": 20, "days": 0, "mins": 60},
     "catalyst_long_call": {"tp": 100, "sl": 50, "days": None},
     "pead":               {"tp": 80,  "sl": 35, "days": 16},
     "bounce":             {"tp": 60,  "sl": 35, "days": 9},
+    "vwap_fade":          {"tp": 40,  "sl": 25, "days": 0, "mins": 30},
 }
 
 
@@ -307,12 +311,14 @@ def trade_plan(strategy: str, setup: dict) -> str:
     plan = STRATEGY_PLAN.get(strategy)
     price = _entry_ref_price(setup)
     near = f" near ${price:,.2f}" if price else ""
+    # Direction-aware: bearish setups (e.g. a vwap_fade of a rip) buy PUTS.
+    side = "puts" if setup.get("direction") == "bearish" else "calls"
     if not plan:
-        return f"buy calls now{near} — manage to target/stop per strategy"
+        return f"buy {side} now{near} — manage to target/stop per strategy"
 
     tp, sl, days = plan["tp"], plan["sl"], plan["days"]
     if days == 0:
-        when = "time-stop 60 min (flat by the close)"
+        when = f"time-stop {plan.get('mins', 60)} min (flat by the close)"
     elif days is None:
         when = "hold through the catalyst (or option expiry)"
     else:
@@ -323,7 +329,7 @@ def trade_plan(strategy: str, setup: dict) -> str:
             when = f"time-stop ~{days}d (by {by})"
         except Exception:
             when = f"time-stop ~{days}d"
-    return f"buy calls now{near} · sell at +{tp}% target or -{sl}% stop · {when}"
+    return f"buy {side} now{near} · sell at +{tp}% target or -{sl}% stop · {when}"
 
 
 def _format_held(entry_time, now=None) -> str:
