@@ -615,10 +615,22 @@ HEARTBEAT_STALE_SEC = 600   # a strategy silent this long is treated as down
 
 def _market_regime() -> dict:
     """Bull/bear regime for the dashboard. Delegates to the shared, per-day-cached
-    market_regime module so there's no extra SPY fetch."""
+    market_regime module so there's no extra SPY fetch. Also carries the intraday
+    red-day state (TTL-cached in market_regime) so the Risk tab can show e.g.
+    "Bull regime / RED day"; try-wrapped so the daily regime still renders if the
+    intraday read breaks."""
     from market_regime import current_regime
     r = current_regime()
-    return {"state": r["state"], "detail": r["detail"]}
+    out = {"state": r["state"], "detail": r["detail"],
+           "intraday": "unknown", "intraday_detail": ""}
+    try:
+        from market_regime import intraday_market_status
+        s = intraday_market_status()
+        out["intraday"] = s.get("state", "unknown")
+        out["intraday_detail"] = s.get("detail", "")
+    except Exception:
+        pass
+    return out
 
 
 def _leg_symbols(record: dict) -> list[str]:
