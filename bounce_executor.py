@@ -40,7 +40,7 @@ from trade_journal import record_closed_trade
 from decision_log import log_decision, ACTION_TRADED, ACTION_REJECTED, ACTION_EXITED
 from logger import get_logger, log_trade
 from heartbeat import beat
-from utils import now_est, today_est, parse_isodt, spread_pct as _spread_pct, is_market_open
+from utils import now_est, today_est, parse_isodt, spread_pct as _spread_pct, is_market_session_open
 
 log = get_logger("bounce_executor")
 
@@ -453,7 +453,8 @@ def execute_bounce_trade(setup: dict) -> bool:
 # ─── Market Hours ──────────────────────────────────────────────────────────────
 
 def _is_market_open() -> bool:
-    return is_market_open(MARKET_OPEN_H, MARKET_OPEN_M, MARKET_CLOSE_H, MARKET_CLOSE_M)
+    # Weekday+window AND the broker clock (holidays / half-days). Fails open.
+    return is_market_session_open(MARKET_OPEN_H, MARKET_OPEN_M, MARKET_CLOSE_H, MARKET_CLOSE_M)
 
 
 # ─── Main Loop ─────────────────────────────────────────────────────────────────

@@ -156,7 +156,8 @@ direction-blind and would kill the oversold-flush CALL fade, which is exactly a 
 ### 4.4 Execution & broker
 - **`tradier_client.py`** — all Tradier REST calls (quotes, chains, greeks, orders, balances). `MOCK_MODE`
   is on whenever no API key is set, so everything degrades to safe empties offline. Houses the consolidated
-  `get_option_mid` and `get_chain_greeks`.
+  `get_option_mid` and `get_chain_greeks`, plus `get_market_clock`/`market_open_now` (the exchange's real
+  session state via `/markets/clock`, TTL-cached ~5 min — how the bot knows about holidays and half-days).
 - **`market_data.py`** — OHLCV (daily/intraday) as DataFrames + `get_news`; the yfinance→Tradier migration
   layer for live data.
 - **`order_manager.py`** — `place_and_confirm()` places an order then **polls to a terminal state** and
@@ -199,7 +200,9 @@ direction-blind and would kill the oversold-flush CALL fade, which is exactly a 
 - **`heartbeat.py`** — `beat()` per loop into `heartbeats/<name>.json`; the watchdog reads these.
 - **`logger.py`** — shared logger + `log_trade`.
 - **`utils.py`** — timezone helpers (`now_est`, `today_est`, `parse_isodt` — everything trades on US/Eastern),
-  `percent_change`, and the shared `spread_pct` / `is_market_open` helpers (§5).
+  `percent_change`, and the shared `spread_pct` / `is_market_open` / `is_market_session_open` helpers (§5) —
+  the latter combines the pure weekday+window check with the broker's live market clock, so every strategy
+  guard is holiday/half-day aware while failing open to the plain time check when the clock can't be read.
 
 ### 4.7 Analytics & dashboard
 - **`analytics_metrics.py`** — Sharpe, max drawdown, total return, win rate, profit factor, expectancy, and
