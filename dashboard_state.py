@@ -610,6 +610,7 @@ _STRATEGY_META = [
     ("hft_intraday",       "hft_executor",    "HFT",      "hft_positions.json",      True),
     ("pead",               "pead_executor",   "PEAD",     "pead_positions.json",     True),
     ("bounce",             "bounce_executor", "Bounce",   "bounce_positions.json",   True),
+    ("vwap_fade",          "vwap_fade_executor", "VWAP-Fade", "vwap_fade_positions.json", True),
 ]
 HEARTBEAT_STALE_SEC = 600   # a strategy silent this long is treated as down
 

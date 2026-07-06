@@ -54,12 +54,12 @@ USER_CONFIG_FILE = "user_config.json"
 
 # Every strategy the bot knows about, in display order. enabled_strategies and
 # strategy_allocation_pct may only reference these names.
-KNOWN_STRATEGIES = ["catalyst_long_call", "iv_rank", "hft_intraday", "pead", "bounce"]
+KNOWN_STRATEGIES = ["catalyst_long_call", "iv_rank", "hft_intraday", "pead", "bounce", "vwap_fade"]
 
 # Strategies that place 0-DTE intraday DAY trades. These are the ones gated by
 # the Pattern-Day-Trader rule (<$25k → max 3 day-trades / 5 business days), so
 # the small/micro tiers disable them outright.
-_DAY_STRATEGIES = {"hft_intraday"}
+_DAY_STRATEGIES = {"hft_intraday", "vwap_fade"}
 
 
 # ─── Tier presets ───────────────────────────────────────────────────────────────
@@ -86,6 +86,7 @@ TIER_PRESETS: dict[str, dict] = {
             "hft_intraday":       0.25,
             "pead":               0.35,
             "bounce":             0.15,
+            "vwap_fade":          0.15,   # allocated but PAUSED until backtested (dark)
         },
         "bear_regime_throttle":  True,
         # In a bear regime, refuse NEW long-directional entries outright (vs just

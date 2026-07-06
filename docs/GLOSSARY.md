@@ -95,6 +95,9 @@ Still referenced in the Decision Log for historical trades.
 | **High-water mark (HWM)** | The peak equity reached; drawdown is measured from it. |
 | **Bear-market throttle** | In a confirmed bear regime (SPY < 200-day SMA), new trades get half budget and fewer slots; small/micro tiers pause new long entries outright (`bear_pause_longs`). |
 | **Red-day gate** | The intraday version of the bear throttle: SPY down ≥0.75% today halves new long budgets ("weak"); down ≥1.5% pauses new long entries ("red") until SPY recovers above −0.4%. Catches the sharp red session a once-a-day regime check can't see. |
+| **VWAP fade** | Strategy 6: an intraday mean-reversion trade that FADES over-extension — when a name is stretched far from VWAP (≥2σ) with an RSI extreme and a stall bar, buy a short-dated put (fade a rip) or call (fade a flush) betting on reversion to VWAP. The complement to the HFT momentum scalper; it makes money on the choppy days HFT sits out. |
+| **Trend-day filter** | The gate that keeps a VWAP fade OFF trend days (where a fade gets run over): skips when the pre-impulse tape is trending against the fade by efficiency ratio, a persistent one-side-of-VWAP session, or a steep EMA slope. |
+| **Efficiency ratio** | Kaufman's trend-strength measure: |net move| ÷ Σ|bar-to-bar moves| over a window. ~1.0 = a clean one-way trend, ~0.0 = chop. Used by the trend-day filter (the bot has no ADX). |
 
 ---
 

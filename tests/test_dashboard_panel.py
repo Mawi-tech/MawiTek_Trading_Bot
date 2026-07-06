@@ -22,6 +22,7 @@ def test_build_strategy_panel(tmp_path, monkeypatch):
     _write("iv_rank_positions.json", [])
     _write("pead_positions.json", [{"underlying": "AMD"}])                            # pead 1
     _write("bounce_positions.json", [])                                               # bounce 0
+    _write("vwap_fade_positions.json", [])                                            # vwap_fade 0
 
     monkeypatch.setattr(hb, "read_heartbeats", lambda: {
         "executor":     {"strategy": "executor",     "status": "scanning", "ts": time.time()},
@@ -38,13 +39,14 @@ def test_build_strategy_panel(tmp_path, monkeypatch):
     ]
     panel = ds.build_strategy_panel(equity=100_000, closed_trades=closed)
 
-    # Five strategies now: catalyst, iv_rank, hft, pead, bounce.
-    assert len(panel["health"]) == 5 and len(panel["strategies"]) == 5
+    # Six strategies now: catalyst, iv_rank, hft, pead, bounce, vwap_fade.
+    assert len(panel["health"]) == 6 and len(panel["strategies"]) == 6
     by = {s["key"]: s for s in panel["strategies"]}
     assert by["catalyst_long_call"]["positions"] == 1
     assert by["hft_intraday"]["positions"] == 2
     assert by["pead"]["positions"] == 1
     assert by["bounce"]["positions"] == 0
+    assert by["vwap_fade"]["positions"] == 0
     assert by["catalyst_long_call"]["usage_pct"] == 0       # retired → 0% allocation (cap 0)
     assert by["catalyst_long_call"]["win_rate"] == 50       # 1 of 2 wins
     assert by["catalyst_long_call"]["pnl"] == 60            # 100 - 40
