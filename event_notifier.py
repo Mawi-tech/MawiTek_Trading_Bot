@@ -277,6 +277,55 @@ def hold_horizon(strategy: str, style: str = "") -> str:
     return "intraday" if style == "day" else "swing — multiple days"
 
 
+# Per-strategy exit plan — mirrors each executor's TAKE_PROFIT_PCT / STOP_LOSS_PCT
+# / MAX_HOLD_* (KEEP IN SYNC if those change). Drives the concrete buy/sell/time
+# plan on entry alerts. All four entry-alert strategies are LONG CALLS. tp/sl are
+# option-premium percentages; `days` is the calendar time-stop
+# (0 = intraday/flat-by-close, None = held through the catalyst / to expiry).
+STRATEGY_PLAN = {
+    "hft_intraday":       {"tp": 100, "sl": 20, "days": 0},
+    "catalyst_long_call": {"tp": 100, "sl": 50, "days": None},
+    "pead":               {"tp": 80,  "sl": 35, "days": 16},
+    "bounce":             {"tp": 60,  "sl": 35, "days": 9},
+}
+
+
+def _entry_ref_price(setup: dict):
+    """Best available 'current price' from a setup to anchor the entry, or None."""
+    for k in ("as_of_close", "price", "last", "underlying_price", "entry_price"):
+        v = setup.get(k)
+        if isinstance(v, (int, float)) and v > 0:
+            return float(v)
+    return None
+
+
+def trade_plan(strategy: str, setup: dict) -> str:
+    """
+    One-line concrete buy/sell/time plan for an entry (long-call) alert:
+    where to enter, the target/stop to sell at, and when the trade times out.
+    """
+    plan = STRATEGY_PLAN.get(strategy)
+    price = _entry_ref_price(setup)
+    near = f" near ${price:,.2f}" if price else ""
+    if not plan:
+        return f"buy calls now{near} — manage to target/stop per strategy"
+
+    tp, sl, days = plan["tp"], plan["sl"], plan["days"]
+    if days == 0:
+        when = "time-stop 60 min (flat by the close)"
+    elif days is None:
+        when = "hold through the catalyst (or option expiry)"
+    else:
+        try:
+            import datetime as _dt
+            from utils import today_est
+            by = (today_est() + _dt.timedelta(days=days)).isoformat()
+            when = f"time-stop ~{days}d (by {by})"
+        except Exception:
+            when = f"time-stop ~{days}d"
+    return f"buy calls now{near} · sell at +{tp}% target or -{sl}% stop · {when}"
+
+
 def _format_held(entry_time, now=None) -> str:
     """
     Human hold duration from an ISO entry timestamp (or datetime) to `now`:
@@ -456,8 +505,10 @@ def notify_trade_setups(setups: list[dict], style: str, strategy: str,
             direction = f" {s.get('direction')}" if s.get("direction") else ""
             tag = "[watchlist] " if on_watch else ""
             # "BUY" prefix so entry alerts read unmistakably as buys, next to the
-            # SELL exit alerts from notify_position_closed.
+            # SELL exit alerts from notify_position_closed. The indented Plan line
+            # spells out where to enter, the sell target/stop, and the time-stop.
             lines.append(f"{tag}BUY {s['ticker']}: {s.get('setup_score')}/100{direction} — {why}")
+            lines.append(f"   Plan: {trade_plan(strategy, s)}")
         lines.append(f"Expected hold: {horizon}")
         lines.append(f"Source: {strategy} scanner. Heads-up only — not an order.")
 
