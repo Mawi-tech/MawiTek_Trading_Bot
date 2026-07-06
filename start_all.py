@@ -77,6 +77,12 @@ COMPONENTS: dict[str, dict] = {
         "label":   "Strategy 5 — Capitulation-bounce executor (bear-regime offense)",
         "needs_broker": True,
     },
+    "vwap_fade_executor": {
+        "script":  "vwap_fade_executor.py",
+        "args":    [],
+        "label":   "Strategy 6 — VWAP mean-reversion fade executor (dark until backtested)",
+        "needs_broker": True,
+    },
     "news_monitor": {
         "script":  "news_feed.py",
         "args":    ["--monitor"],
@@ -313,7 +319,8 @@ def main() -> int:
         HEARTBEAT_CHECK_EVERY   = 30
         # Only watch components that actually beat (not the dashboard server).
         watched = {n for n in procs if n in ("executor", "iv_rank_bot", "hft_executor",
-                                             "pead_executor", "bounce_executor", "news_monitor")}
+                                             "pead_executor", "bounce_executor",
+                                             "vwap_fade_executor", "news_monitor")}
         stalled_alerted: set[str] = set()
         launch_time = time.time()
         last_hb_check = 0.0

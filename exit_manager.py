@@ -38,6 +38,10 @@ class TrailScaleConfig:
 HFT_EXIT    = TrailScaleConfig(trail_activate=0.40, trail_giveback=0.25, scale_trigger=0.50, scale_fraction=0.5)
 PEAD_EXIT   = TrailScaleConfig(trail_activate=0.40, trail_giveback=0.25, scale_trigger=0.50, scale_fraction=0.5)
 BOUNCE_EXIT = TrailScaleConfig(trail_activate=0.30, trail_giveback=0.20, scale_trigger=0.40, scale_fraction=0.5)
+# VWAP mean-reversion fade: the reversion pop is fast and gives back fast, so arm
+# the trail and bank the partial EARLIER than the momentum books — a fade's edge
+# is the quick snap to VWAP, not a convex runner.
+VWAP_FADE_EXIT = TrailScaleConfig(trail_activate=0.25, trail_giveback=0.15, scale_trigger=0.30, scale_fraction=0.5)
 
 
 def update_peak(pos: dict, pnl_frac: float) -> float:
