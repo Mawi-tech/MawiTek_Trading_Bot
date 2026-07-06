@@ -103,3 +103,43 @@ def test_entry_alert_has_buy_and_expected_hold(monkeypatch):
     _, lines, _ = sent[0]
     assert any(l.startswith("BUY TSLA") or l.startswith("[watchlist] BUY TSLA") for l in lines)
     assert any(l.startswith("Expected hold:") and "16 days" in l for l in lines)
+
+
+# ── trade_plan (buy / sell / time detail) ────────────────────────────────────
+
+def test_trade_plan_pead_has_buy_sell_and_timestop():
+    plan = en.trade_plan("pead", {"as_of_close": 120.50})
+    assert "buy calls now near $120.50" in plan
+    assert "+80% target" in plan
+    assert "-35% stop" in plan
+    assert "time-stop ~16d (by " in plan
+
+
+def test_trade_plan_hft_is_intraday():
+    plan = en.trade_plan("hft_intraday", {})
+    assert "+100% target" in plan and "-20% stop" in plan
+    assert "60 min" in plan
+    assert "near $" not in plan          # no price field → no price anchor
+
+
+def test_trade_plan_catalyst_holds_through_event():
+    plan = en.trade_plan("catalyst_long_call", {"price": 55.0})
+    assert "near $55.00" in plan
+    assert "through the catalyst" in plan
+
+
+def test_trade_plan_unknown_strategy_degrades():
+    plan = en.trade_plan("mystery", {})
+    assert "buy calls now" in plan and "per strategy" in plan
+
+
+def test_entry_alert_includes_plan_line(monkeypatch):
+    sent = _capture(monkeypatch)
+    en.notify_trade_setups([{"ticker": "NVDA", "setup_score": 80, "direction": "bullish",
+                             "as_of_close": 200.0}],
+                           style="swing", strategy="bounce")
+    _, lines, _ = sent[0]
+    plan_lines = [l for l in lines if l.strip().startswith("Plan:")]
+    assert len(plan_lines) == 1
+    assert "near $200.00" in plan_lines[0]
+    assert "+60% target" in plan_lines[0] and "time-stop ~9d" in plan_lines[0]
