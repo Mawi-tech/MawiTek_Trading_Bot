@@ -1,16 +1,22 @@
-MIT License
+Copyright (c) 2026 MawiTek. All rights reserved.
 
-Copyright (c) 2026 MawiTek
+This software and its source code are made publicly viewable for portfolio,
+reference, and evaluation purposes ONLY. No license — express or implied — is
+granted to use, copy, modify, merge, publish, distribute, sublicense, or sell
+any part of this software.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+YOU MAY:
+  - View and read the source code on its hosted repository.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+YOU MAY NOT, without the prior written permission of the copyright holder:
+  - Copy, reproduce, clone for reuse, or redistribute the code or any
+    substantial portion of it;
+  - Modify the code or create derivative works from it;
+  - Use the code, in whole or in part, in any personal, academic, or
+    commercial project, or to operate any live or paper trading system.
+
+No trademark, patent, or other rights are granted. All rights not expressly
+granted above are reserved by the copyright holder.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -19,3 +25,5 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+For licensing inquiries, contact the repository owner.
