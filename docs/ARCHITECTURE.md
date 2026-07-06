@@ -1,7 +1,7 @@
 # MawiTek Trading Bot — Architecture & Calculations Reference
 
 A multi-strategy, options-focused trading bot for the **Tradier** brokerage (paper/sandbox
-as of this writing). It runs five independent strategies as separate processes, shares one
+as of this writing). It runs six independent strategies as separate processes, shares one
 risk manager and one set of state files, and serves a single-page dashboard.
 
 This document covers **how every file works** and **how every number is calculated** (with the
@@ -37,6 +37,7 @@ guard and heartbeat):
 | Strategy 3 — HFT | `hft_executor.py` | Intraday 0-DTE momentum scalps |
 | Strategy 4 — PEAD | `pead_executor.py` | Post-earnings / news-drift swings (14–35 DTE) |
 | Strategy 5 — Bounce | `bounce_executor.py` | Bear-regime capitulation-bounce longs |
+| Strategy 6 — VWAP Fade | `vwap_fade_executor.py` | Intraday VWAP mean-reversion fade (bidirectional; dark until backtested) |
 | News monitor | `news_feed.py --monitor` | Multi-source headline feed + social-sentiment sweep |
 | Dashboard server | `dashboard_server.py` | Static server for `dashboard.html` + JSON state |
 
@@ -47,7 +48,7 @@ into `dashboard_state.json` → `dashboard.html` polls and renders it.
 
 ---
 
-## 3. The five strategies (entry/exit logic)
+## 3. The six strategies (entry/exit logic)
 
 ### Strategy 1 — Catalyst long calls (`executor.py`, `options_scanner.py`)
 Buys ~ATM/OTM **long calls 7–30 DTE before** an earnings or news catalyst, betting on a directional
@@ -85,6 +86,19 @@ edge). Exits: **TP +80% / SL −35%**, drift-fade (spot back through the pre-eve
 The bear-market *offense*: in a **bear regime only**, buys short-dated calls on oversold down-gaps
 (capitulation that snaps back). Same gap detector as PEAD but contrarian and regime-gated — validated
 strongly in bear samples, disastrous in bull, so it is hard-gated by `market_regime`.
+
+### Strategy 6 — VWAP mean-reversion fade (`vwap_fade_executor.py`, `vwap_fade_scanner.py`)
+The intraday *complement* to Strategy 3: HFT buys breakouts and goes quiet on calm/range-bound days, so
+this **fades over-extension** instead — when a liquid name is stretched far from intraday VWAP
+(volatility-normalized z-score ≥ 2σ) with an RSI extreme and a **stall bar**, it buys a short-dated
+option betting on reversion to VWAP (a PUT to fade a rip, a CALL to fade a flush — **bidirectional**).
+The single most important gate is `is_trend_day` (Kaufman efficiency ratio, persistent one-side-of-VWAP,
+EMA20 slope — all measured on the *pre-impulse* context) which skips the fade on trend days that would run
+it over. Reversion-tuned exits: **VWAP-touch TP**, **+40% / −25%** premium TP/SL, a hard **further-stretch
+invalidation**, and a **30-min time-stop**. It reuses Strategy 3's indicators, contract selection, and
+exit-manager plumbing. **Ships dark** — `PAUSED_STRATEGIES` + `ENABLE_VWAP_FADE=False` — until
+`backtest_vwap_fade.py` passes on two independent samples. Deliberately **not** red-day-gated (the gate is
+direction-blind and would kill the oversold-flush CALL fade, which is exactly a red-day play).
 
 ---
 
@@ -220,7 +234,9 @@ strongly in bear samples, disastrous in bull, so it is hard-gated by `market_reg
 `backtest_iv_rank_directional.py` (the `ENABLE_BEAR_CALL` go-live gate: A/Bs the market-aware
 bull-put/bear-call fallback against the always-bull-put baseline on the same signals — its docstring
 carries the two-sample acceptance criteria), `backtest_pead.py`,
-`backtest_bounce.py`, plus the "rejected experiment" tools `backtest_crush.py`, `backtest_bear_call.py`
+`backtest_bounce.py`, `backtest_vwap_fade.py` (the `ENABLE_VWAP_FADE` go-live gate: theta-honest
+intraday sim of the mean-reversion fade with a CALL-vs-PUT P&L split, two-sample acceptance in its
+docstring), plus the "rejected experiment" tools `backtest_crush.py`, `backtest_bear_call.py`
 (bear-calls on the PEAD drift signal — the *signal* was the rejection, which is why the IV-rank-signal
 retry above gets its own gate), `backtest_orb.py`, `backtest_vwap_bounce.py`. They share a Black-Scholes pricing core (§5.15). **Intentionally
 left duplicated** rather than consolidated: they are untested dev tools that have diverged in small tuned ways

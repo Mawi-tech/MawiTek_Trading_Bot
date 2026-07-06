@@ -109,7 +109,7 @@ MAX_OPEN_POSITIONS  = MAX_SWING_POSITIONS + MAX_DAY_POSITIONS   # combined (dash
 
 # Which strategies count as which book.
 SWING_STRATEGIES = {"catalyst_long_call", "iv_rank", "pead", "bounce"}
-DAY_STRATEGIES   = {"hft_intraday"}
+DAY_STRATEGIES   = {"hft_intraday", "vwap_fade"}
 
 # A trade with this DTE or less is a DAY trade regardless of strategy — it
 # expires (almost) today, so it's an intraday play, not an overnight hold.
@@ -163,7 +163,7 @@ PORTFOLIO_VEGA_LIMIT  = True
 MAX_PORTFOLIO_VEGA_PCT = 0.01   # |net vega| cap = 1% of equity per vol point
 
 # Which side of vol each strategy adds when it opens a position.
-LONG_VEGA_STRATEGIES  = {"catalyst_long_call", "pead", "bounce", "hft_intraday"}  # buy options
+LONG_VEGA_STRATEGIES  = {"catalyst_long_call", "pead", "bounce", "hft_intraday", "vwap_fade"}  # buy options
 SHORT_VEGA_STRATEGIES = {"iv_rank"}                                              # sell premium
 
 # ── IV-aware sizing ─────────────────────────────────────────────────────────────
@@ -215,6 +215,7 @@ STRATEGY_ALLOCATION_PCT = {
     "hft_intraday":       0.25,   # intraday 0-DTE
     "pead":               0.35,   # post-earnings / news drift (swing) — best validated (+158%)
     "bounce":             0.15,   # bear-regime capitulation bounce (only deploys in bear)
+    "vwap_fade":          0.15,   # intraday VWAP mean-reversion fade (new; dark until backtested)
 }
 
 # Strategies the bot will NOT open NEW positions in, regardless of tier/config.
@@ -227,11 +228,15 @@ STRATEGY_ALLOCATION_PCT = {
 RETIRED_STRATEGIES = {"catalyst_long_call"}
 
 # Strategies PAUSED pending revalidation — like retired (no new entries; exits
-# still run), but TEMPORARY and reversible. Empty now: hft_intraday was paused
-# 2026-06-30, then RE-ENABLED after the theta-honest backtest validated the
-# tighter 3/50 config on two independent samples (mega +$747 / broad +$238).
-# The mechanism is kept for future use — add a strategy key here to pause it.
-PAUSED_STRATEGIES: set[str] = set()
+# still run), but TEMPORARY and reversible. hft_intraday was paused 2026-06-30,
+# then RE-ENABLED after the theta-honest backtest validated the tighter 3/50
+# config on two independent samples (mega +$747 / broad +$238).
+# vwap_fade (Strategy 6) is paused pending its INITIAL validation — it ships dark
+# until backtest_vwap_fade.py passes on two independent samples. This is the
+# runtime guard; the scanner's ENABLE_VWAP_FADE flag is the belt-and-suspenders.
+# At go-live: remove it here, flip ENABLE_VWAP_FADE, and add it to the tier
+# enabled_strategies lists — all together.
+PAUSED_STRATEGIES: set[str] = {"vwap_fade"}
 
 # State file to persist daily P&L across restarts
 STATE_FILE      = "risk_state.json"
@@ -529,6 +534,7 @@ def _open_underlyings() -> list[str]:
     """Every open position's underlying, across all strategy books."""
     return (_book_underlyings("open_positions.json")
             + _book_underlyings("hft_positions.json")
+            + _book_underlyings("vwap_fade_positions.json")
             + _book_underlyings("iv_rank_positions.json")
             + _book_underlyings("pead_positions.json")
             + _book_underlyings("bounce_positions.json"))
@@ -593,7 +599,8 @@ def count_positions_by_type(trade_type: str) -> int:
     families can fill their slots independently.
     """
     if trade_type == "day":
-        return _count_book("hft_positions.json", is_list=True)
+        return (_count_book("hft_positions.json", is_list=True)
+                + _count_book("vwap_fade_positions.json", is_list=True))
     return (_count_book("open_positions.json", is_list=False)
             + _count_book("iv_rank_positions.json", is_list=True)
             + _count_book("pead_positions.json", is_list=True)
@@ -754,6 +761,17 @@ def deployed_capital_by_strategy() -> dict[str, float]:
                 out["hft_intraday"] += px * qty * 100
     except Exception as e:
         print(f"[RiskManager] deployed_capital: could not read hft_positions: {e}")
+
+    try:
+        if os.path.exists("vwap_fade_positions.json"):
+            with open("vwap_fade_positions.json", "r") as f:
+                fade = json.load(f)
+            for p in (fade if isinstance(fade, list) else []):
+                px  = float(p.get("entry_price", 0) or 0)
+                qty = abs(int(p.get("quantity", 0) or 0))
+                out["vwap_fade"] += px * qty * 100
+    except Exception as e:
+        print(f"[RiskManager] deployed_capital: could not read vwap_fade_positions: {e}")
 
     try:
         if os.path.exists("pead_positions.json"):
