@@ -296,11 +296,56 @@ STRATEGY_PLAN = {
 
 def _entry_ref_price(setup: dict):
     """Best available 'current price' from a setup to anchor the entry, or None."""
-    for k in ("as_of_close", "price", "last", "underlying_price", "entry_price"):
+    # "last_price" is what the intraday scanners (hft / vwap_fade) emit; without
+    # it the day-trade alerts showed no entry price at all.
+    for k in ("as_of_close", "price", "last", "last_price", "underlying_price", "entry_price"):
         v = setup.get(k)
         if isinstance(v, (int, float)) and v > 0:
             return float(v)
     return None
+
+
+def _fmt_price(p: float) -> str:
+    return f"${p:,.2f}"
+
+
+def hold_window(strategy: str) -> str:
+    """Concise expected hold, derived from the strategy's plan (mins for intraday,
+    days for swing). Complements the fuller STRATEGY_HORIZON sentence."""
+    plan = STRATEGY_PLAN.get(strategy) or {}
+    days = plan.get("days")
+    if days == 0:
+        return f"~{plan.get('mins', 60)} min (flat by the close)"
+    if isinstance(days, int) and days > 0:
+        return f"up to ~{days} day(s)"
+    if days is None and plan:
+        return "held through the catalyst / to expiry"
+    return "intraday" if strategy in ("hft_intraday", "vwap_fade") else "multi-day"
+
+
+def move_estimate(strategy: str, setup: dict) -> str:
+    """
+    One line describing the POTENTIAL MOVE for a setup: estimated entry, a concrete
+    target level where the strategy defines one, the expected move size, and the
+    hold window. Best-effort from the fields a setup already carries — returns ""
+    if there's nothing useful to say.
+    """
+    parts: list[str] = []
+    entry = _entry_ref_price(setup)
+    if entry:
+        parts.append(f"entry ~{_fmt_price(entry)}")
+
+    # Concrete underlying TARGET: the mean-reversion fade targets VWAP itself, so
+    # we can quote the level and the expected reversion size in %.
+    vwap = setup.get("vwap")
+    if strategy == "vwap_fade" and entry and isinstance(vwap, (int, float)) and vwap > 0:
+        move_pct = abs(entry - vwap) / entry * 100
+        parts.append(f"target VWAP {_fmt_price(vwap)} (~{move_pct:.1f}% reversion)")
+    elif isinstance(setup.get("pct_vs_vwap"), (int, float)):
+        parts.append(f"{setup['pct_vs_vwap']:+.1f}% vs VWAP")
+
+    parts.append(f"hold {hold_window(strategy)}")
+    return " · ".join(parts)
 
 
 def trade_plan(strategy: str, setup: dict) -> str:
@@ -514,6 +559,9 @@ def notify_trade_setups(setups: list[dict], style: str, strategy: str,
             # SELL exit alerts from notify_position_closed. The indented Plan line
             # spells out where to enter, the sell target/stop, and the time-stop.
             lines.append(f"{tag}BUY {s['ticker']}: {s.get('setup_score')}/100{direction} — {why}")
+            move = move_estimate(strategy, s)
+            if move:
+                lines.append(f"   Est. move: {move}")
             lines.append(f"   Plan: {trade_plan(strategy, s)}")
         lines.append(f"Expected hold: {horizon}")
         lines.append(f"Source: {strategy} scanner. Heads-up only — not an order.")
