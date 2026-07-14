@@ -82,6 +82,17 @@ def gather_daily_stats() -> dict:
     curve = load_equity_curve()
     equity = float(curve[-1]["equity"]) if curve else 0.0
 
+    # Paused strategies (runtime control_state.json). Surfaced daily so a manual
+    # pause that was never lifted can't silently sit there costing setups — a
+    # forgotten hft_intraday pause once blocked a whole session of momentum
+    # signals on an otherwise green day. Fails open: control issues never break
+    # the summary.
+    try:
+        from bot_control import load_control
+        paused_strategies = load_control().get("paused_strategies", [])
+    except Exception:
+        paused_strategies = []
+
     lifetime = compute_metrics(curve, all_trades)
 
     return {
@@ -99,6 +110,7 @@ def gather_daily_stats() -> dict:
         "overnight_cost": round(overnight_cost, 2),
         "hft_open": hft_open,
         "iv_open": iv_open,
+        "paused_strategies": paused_strategies,
         "lifetime_win_rate": lifetime["trades"].get("win_rate"),
         "lifetime_profit_factor": lifetime["trades"].get("profit_factor"),
         "lifetime_max_dd": lifetime["max_drawdown"].get("pct"),
@@ -124,6 +136,8 @@ def _format_lines(s: dict) -> list[str]:
                  f"${s['overnight_cost']:,.0f} catalyst cost basis")
     if s["hft_open"]:
         lines.append(f"⚠ {s['hft_open']} HFT position(s) still open — expected flat after EOD")
+    if s.get("paused_strategies"):
+        lines.append(f"⚠ Paused strategies (no new entries): {', '.join(s['paused_strategies'])}")
     pf = s["lifetime_profit_factor"]
     pf_str = "∞" if pf in (None, float("inf")) and s["lifetime_win_rate"] else (f"{pf}" if pf is not None else "n/a")
     lines.append(f"Lifetime: win rate {s['lifetime_win_rate']}% · profit factor {pf_str} · max DD {s['lifetime_max_dd']}%")

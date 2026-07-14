@@ -45,6 +45,26 @@ RISK_PER_TRADE_PCT    = 0.03    # Risk 3% of account per trade
 DAILY_LOSS_LIMIT_PCT  = 0.05    # Halt if down 5% on the day
 MAX_POSITION_SIZE_PCT = 0.05    # No single position > 5% of account
 
+# ── Per-trade worst-case loss cap (decoupled from the daily halt) ────────────────
+# The budget above (RISK_PER_TRADE_PCT) sizes how much CAPITAL a trade deploys,
+# but for a DEFINED-RISK options structure the amount that can actually be LOST is
+# a separate, larger number: a credit spread's max loss is (width - credit), and a
+# gap can realise ALL of it in one move (the stop never gets a chance to work).
+#
+# Historically that max loss was allowed to reach ~RISK_PER_TRADE_PCT (3%) of the
+# account, which is more than half of the 5% daily-loss halt — so a SINGLE bad
+# spread could gap to its max loss and, by itself, trip the halt and freeze the
+# bot for the rest of the day (this is exactly what one COHR bull-put did:
+# ~-$2,760 on a ~$78k account, ~3.6%, which latched the daily halt and blocked
+# every other setup that session).
+#
+# MAX_TRADE_LOSS_PCT caps the WORST-CASE loss of any one trade well below the
+# daily limit, so it now takes SEVERAL independent losers to halt the day rather
+# than one. It is intentionally distinct from RISK_PER_TRADE_PCT (deployment) and
+# from DAILY_LOSS_LIMIT_PCT (the day's circuit breaker): keep it comfortably under
+# the daily limit so the two can never be consumed by a single position.
+MAX_TRADE_LOSS_PCT    = 0.015   # No single trade may risk more than 1.5% of equity
+
 # ── Bear-market risk throttle ───────────────────────────────────────────────────
 # When the broad market is in a confirmed downtrend (SPY < 200-day SMA), the
 # bot's long-biased edge weakens, so every NEW trade is automatically de-risked:
@@ -328,6 +348,47 @@ def get_position_size(equity: float) -> float:
     risk_amount  = equity * risk_pct
     max_position = equity * max_pct
     return min(risk_amount, max_position)
+
+
+def max_trade_loss_dollars(equity: float) -> float:
+    """
+    Hard ceiling, in dollars, on the WORST-CASE loss of any single trade.
+
+    This is deliberately separate from get_position_size() (which caps the
+    capital a trade DEPLOYS): for a defined-risk spread the max loss is
+    (width - credit) * 100 * qty, and a gap can realise all of it at once. The
+    cap keeps that number well under the daily-loss halt so one position can
+    never consume the whole day's budget (see MAX_TRADE_LOSS_PCT).
+
+    The percentage can be overridden per tier via user_config's
+    'max_trade_loss_pct'; absent that, it falls back to the module constant.
+    """
+    cfg = active_config(equity)
+    pct = cfg.get("max_trade_loss_pct", MAX_TRADE_LOSS_PCT) if cfg else MAX_TRADE_LOSS_PCT
+    return abs(equity) * float(pct)
+
+
+def cap_contracts_by_max_loss(
+    desired_qty: int, max_loss_per_contract: float, equity: float
+) -> int:
+    """
+    Clamp a contract count so the position's WORST-CASE loss stays within
+    max_trade_loss_dollars(equity).
+
+    `max_loss_per_contract` is the dollar loss ONE contract suffers in its worst
+    case — for a credit vertical that is (width - credit) * 100, i.e. legs["max_risk"].
+
+    Returns the largest quantity whose total worst-case loss is within the cap,
+    never more than `desired_qty`. Returns 0 when even a single contract already
+    breaches the cap — the caller must then SKIP the trade rather than knowingly
+    open a position that can blow past the per-trade loss limit. Fails open only
+    when the per-contract risk is unknown (<= 0), leaving `desired_qty` untouched.
+    """
+    if max_loss_per_contract <= 0:
+        return desired_qty  # unknown/undefined risk — nothing to cap against
+    cap = max_trade_loss_dollars(equity)
+    max_contracts = int(cap // max_loss_per_contract)
+    return max(0, min(desired_qty, max_contracts))
 
 
 def calculate_contracts(budget: float, mid_price: float) -> int:
@@ -1055,6 +1116,7 @@ def pre_trade_check(ticker: str, strategy: str | None = None) -> dict:
             "equity": float,
             "budget": float,        # Max $ for this trade
             "daily_pnl": float,
+            "max_trade_loss": float,  # Worst-case per-trade loss ceiling ($)
         }
     """
     # Get account data
@@ -1201,6 +1263,9 @@ def pre_trade_check(ticker: str, strategy: str | None = None) -> dict:
         "equity":   equity,
         "budget":   budget,
         "daily_pnl": daily_pnl,
+        # Worst-case per-trade loss ceiling (dollars). Sizing for defined-risk
+        # structures clamps against this so one gap can't consume the daily halt.
+        "max_trade_loss": round(max_trade_loss_dollars(equity), 2),
     }
 
 
