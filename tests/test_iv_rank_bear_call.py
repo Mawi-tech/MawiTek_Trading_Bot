@@ -44,6 +44,31 @@ def test_bear_call_picks_short_leg_by_delta():
     assert legs["max_risk"] == 355.0
 
 
+# ── _select_bull_put_spread credit-to-width floor ────────────────────────────
+
+def test_bull_put_skips_when_credit_below_width_floor():
+    # Credit 1.05 on a 5-wide spread = 21% < BULL_PUT_MIN_CREDIT_FRAC (33%):
+    # risking 3.95 to make 1.05 is the upside-down R:R the floor exists to reject.
+    spot = 100.0
+    chain = [
+        _put(95, 2.00, 2.10),   # short put, mid 2.05
+        _put(90, 0.95, 1.05),   # long put,  mid 1.00 → credit 1.05 (21% of width)
+    ]
+    assert ivr._select_bull_put_spread(chain, spot, "2026-08-21", 30) is None
+
+
+def test_bull_put_accepts_when_credit_clears_floor():
+    # Credit 1.80 on a 5-wide spread = 36% ≥ 33% floor → a fair R:R, accepted.
+    spot = 100.0
+    chain = [
+        _put(95, 2.75, 2.85),   # short put, mid 2.80
+        _put(90, 0.95, 1.05),   # long put,  mid 1.00 → credit 1.80 (36% of width)
+    ]
+    legs = ivr._select_bull_put_spread(chain, spot, "2026-08-21", 30)
+    assert legs is not None and legs["strategy"] == "bull_put_spread"
+    assert legs["net_credit"] == 1.80
+
+
 def test_bear_call_falls_back_to_pct_otm_without_greeks():
     spot = 100.0
     chain = [
@@ -93,7 +118,9 @@ def _wire_chain(monkeypatch, chain):
 
 def _vertical_chain():
     return [
-        _put(95, 2.00, 2.10),
+        # Short put credit must clear BULL_PUT_MIN_CREDIT_FRAC (≥ 1/3 of the
+        # 5-wide spread = ≥ 1.65): 2.80 - 1.00 = 1.80 credit (36% of width).
+        _put(95, 2.75, 2.85),
         _put(90, 0.95, 1.05),
         _call(105, 2.00, 2.10, delta=0.30),
         _call(110, 0.56, 0.64, delta=0.10),

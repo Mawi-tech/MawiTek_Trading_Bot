@@ -44,7 +44,13 @@ from tradier_client import (
     get_open_positions, get_option_mid, MOCK_MODE,
 )
 from order_manager import place_and_confirm, recover_pending_orders
-from risk_manager import pre_trade_check, record_trade, reconcile_from_broker
+from risk_manager import (
+    pre_trade_check,
+    record_trade,
+    reconcile_from_broker,
+    cap_contracts_by_max_loss,
+    max_trade_loss_dollars,
+)
 from trade_journal import record_closed_trade
 from state_io import file_lock, atomic_write_json, read_json
 from utils import now_est, today_est
@@ -75,7 +81,19 @@ IVR_POSITIONS_FILE  = "iv_rank_positions.json"
 
 # Credit spread (bull put): manage by % of the credit received.
 SPREAD_TP_PCT       = 0.50   # Close after capturing 50% of the credit (buy back at 50% of entry credit)
-SPREAD_SL_MULT      = 2.0    # Stop when the spread costs 2x the credit to close (≈ -1x credit loss)
+# Stop when the spread costs SPREAD_SL_MULT x the credit to close.
+#   1.5x  → we bail at a loss of 0.5x the credit (spread mid = 1.5x credit).
+# This used to be 2.0x (bail at -1.0x credit). The problem: this is a SOFT stop —
+# it only acts when the monitor loop next samples the spread mid, so a fast/gap
+# move blows straight through it. A COHR bull-put once triggered at a sampled
+# 6.05 but did not FILL until 9.70 (near the $10 max width) — the wider the gap
+# between the stop level and max loss, the more room a gap has to run. Tightening
+# to 1.5x shrinks that gap so a soft stop leaks less before it acts, and pairs
+# with the per-trade max-loss size cap (risk_manager.MAX_TRADE_LOSS_PCT) that
+# bounds the damage even on a full gap to max loss. NOTE: the fully robust fix is
+# a RESTING stop order at the broker (an OTOCO/stop on the spread) so the exit
+# is queued rather than polled; this tighter soft stop is the interim guard.
+SPREAD_SL_MULT      = 1.5
 
 # Long straddle: manage by % move on the debit paid.
 STRADDLE_TP_PCT     = 0.50   # Close at +50% on the debit
@@ -108,6 +126,20 @@ BC_SHORT_DELTA_BAND   = (0.20, 0.35)  # ...within this band (≈65–80% POP sho
 BC_SHORT_OTM_FALLBACK = 1.05          # no greeks on the chain → short ~5% OTM
 BC_LONG_OTM           = 1.10          # protective long call ~10% OTM (defines risk)
 BC_MIN_CREDIT_FRAC    = 0.20          # require credit ≥ 20% of width, else skip
+
+# Bull-put credit-to-width floor. The bull-put is the account's DEFAULT premium
+# seller (it fires in the healthy market that is the common case), so its risk/
+# reward drives most of the strategy's P&L. Historically this path had NO
+# credit/width floor at all — it would sell a spread no matter how thin the
+# credit, i.e. risking (width - credit) to make a sliver. Requiring credit ≥ 1/3
+# of width caps the worst-case risk:reward near 2:1 (risk ≈ 0.67x width to make
+# ≈ 0.33x width) instead of the 2.5:1+ that a thin credit implies. The COHR
+# bull-put that halted the day collected only 2.80 on a 10-wide spread (28% of
+# width — risking 7.20 to make 2.80, ~2.6:1) and would be REJECTED by this floor.
+# Deliberately stricter than the bear-call's 20%: the bear-call is a rarely-used,
+# separately-gated red-day mirror, whereas the bull-put trades constantly and was
+# the demonstrated bleed.
+BULL_PUT_MIN_CREDIT_FRAC = 0.33       # require credit ≥ 1/3 of width, else skip
 
 # Entry-leg limit price buffer. Legs used to be priced EXACTLY at mid, and in
 # practice those orders sat unfilled for the whole 30s window and got cancelled
@@ -500,6 +532,18 @@ def _select_bull_put_spread(
         return None
 
     width  = sell_strike - buy_strike
+
+    # Credit-to-width floor: refuse spreads that don't pay enough for the risk.
+    # Without this, the bull-put path would sell any positive credit, however
+    # thin — an upside-down risk:reward (risk width-credit to make a sliver).
+    if net_credit < width * BULL_PUT_MIN_CREDIT_FRAC:
+        print(
+            f"[IVRank] Bull-put skipped | credit ${net_credit:.2f} < "
+            f"{BULL_PUT_MIN_CREDIT_FRAC:.0%} of ${width:.0f} width "
+            f"(${width * BULL_PUT_MIN_CREDIT_FRAC:.2f}) — not paid enough for the risk"
+        )
+        return None
+
     max_risk = round((width - net_credit) * 100, 2)
 
     print(
@@ -800,28 +844,30 @@ def execute_iv_rank_trade(setup: dict) -> bool:
     strategy = legs["strategy"]
 
     if strategy == "bull_put_spread":
-        return _execute_bull_put(ticker, legs, budget)
+        return _execute_bull_put(ticker, legs, budget, equity)
     elif strategy == "bear_call_spread":
-        return _execute_bear_call(ticker, legs, budget)
+        return _execute_bear_call(ticker, legs, budget, equity)
     elif strategy == "iron_condor":
-        return _execute_iron_condor(ticker, legs, budget)
+        return _execute_iron_condor(ticker, legs, budget, equity)
     elif strategy == "long_straddle":
         return _execute_straddle(ticker, legs, budget)
 
     return False
 
 
-def _execute_bull_put(ticker: str, legs: dict, budget: float) -> bool:
+def _execute_bull_put(ticker: str, legs: dict, budget: float, equity: float) -> bool:
     """Place sell + buy legs for a bull-put credit spread."""
-    return _execute_credit_vertical(ticker, legs, budget, opt_type="put")
+    return _execute_credit_vertical(ticker, legs, budget, equity, opt_type="put")
 
 
-def _execute_bear_call(ticker: str, legs: dict, budget: float) -> bool:
+def _execute_bear_call(ticker: str, legs: dict, budget: float, equity: float) -> bool:
     """Place sell + buy legs for a bear-call credit spread."""
-    return _execute_credit_vertical(ticker, legs, budget, opt_type="call")
+    return _execute_credit_vertical(ticker, legs, budget, equity, opt_type="call")
 
 
-def _execute_credit_vertical(ticker: str, legs: dict, budget: float, opt_type: str) -> bool:
+def _execute_credit_vertical(
+    ticker: str, legs: dict, budget: float, equity: float, opt_type: str
+) -> bool:
     """
     Place the two legs of a defined-risk credit vertical (bull-put or
     bear-call — mechanically identical, only the option type differs).
@@ -830,7 +876,26 @@ def _execute_credit_vertical(ticker: str, legs: dict, budget: float, opt_type: s
     if max_risk_per_contract <= 0:
         return False
 
+    # Size by budget (capital to deploy), then clamp so the position's WORST-CASE
+    # loss — max_risk_per_contract * qty, which a gap can realise in full — stays
+    # within the per-trade loss cap (risk_manager.MAX_TRADE_LOSS_PCT). This is what
+    # stops one spread from gapping to a loss big enough to trip the daily halt.
     quantity = max(1, int(budget // max_risk_per_contract))
+    capped = cap_contracts_by_max_loss(quantity, max_risk_per_contract, equity)
+    if capped < quantity:
+        print(
+            f"[IVRank] {ticker} size capped {quantity}→{capped} by per-trade loss "
+            f"limit (max risk ${max_risk_per_contract:,.0f}/contract, "
+            f"cap ${max_trade_loss_dollars(equity):,.0f})"
+        )
+    if capped <= 0:
+        print(
+            f"[IVRank] {ticker} skipped — one contract's max risk "
+            f"${max_risk_per_contract:,.0f} exceeds the per-trade loss cap "
+            f"${max_trade_loss_dollars(equity):,.0f}"
+        )
+        return False
+    quantity = capped
     label  = legs["strategy"].replace("_", "-").replace("-spread", " spread")
     suffix = "P" if opt_type == "put" else "C"
 
@@ -913,7 +978,7 @@ def _execute_credit_vertical(ticker: str, legs: dict, budget: float, opt_type: s
     return True
 
 
-def _execute_iron_condor(ticker: str, legs: dict, budget: float) -> bool:
+def _execute_iron_condor(ticker: str, legs: dict, budget: float, equity: float) -> bool:
     """
     Place a 4-leg iron condor. Leg order matters for risk: BUY both protective
     wings FIRST (long put + long call), THEN sell the two short legs. That way,
@@ -923,7 +988,26 @@ def _execute_iron_condor(ticker: str, legs: dict, budget: float) -> bool:
     max_risk = legs["max_risk"]
     if max_risk <= 0:
         return False
+
+    # Same per-trade worst-case loss cap as the credit verticals: a condor's max
+    # loss (one side blowing out) can also be realised on a gap, so clamp qty so
+    # max_risk * qty stays within MAX_TRADE_LOSS_PCT of equity.
     quantity = max(1, int(budget // max_risk))
+    capped = cap_contracts_by_max_loss(quantity, max_risk, equity)
+    if capped < quantity:
+        print(
+            f"[IVRank] {ticker} condor size capped {quantity}→{capped} by per-trade "
+            f"loss limit (max risk ${max_risk:,.0f}/contract, "
+            f"cap ${max_trade_loss_dollars(equity):,.0f})"
+        )
+    if capped <= 0:
+        print(
+            f"[IVRank] {ticker} condor skipped — one contract's max risk "
+            f"${max_risk:,.0f} exceeds the per-trade loss cap "
+            f"${max_trade_loss_dollars(equity):,.0f}"
+        )
+        return False
+    quantity = capped
 
     def _leg_mid_est(leg: dict) -> float:
         return round((float(leg.get("bid", 0)) + float(leg.get("ask", 0))) / 2, 2)
