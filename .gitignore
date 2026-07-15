@@ -102,6 +102,9 @@ desktop.ini
 # User-set risk/alert config + runtime control state (machine-local)
 user_config.json
 control_state.json
+# Signal-distribution targets (holds webhook URLs / bot tokens) + its send ledger
+distribution_targets.json
+distribution_state.json
 # Caches + feeds the bot regenerates at runtime
 events.json
 iv_cache.json
