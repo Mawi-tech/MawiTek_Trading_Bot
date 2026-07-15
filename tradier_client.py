@@ -19,6 +19,7 @@ Docs: https://documentation.tradier.com
 """
 
 import os
+import time
 import requests
 from datetime import datetime
 
@@ -373,6 +374,57 @@ def get_quote_details(symbols: list[str]) -> dict[str, dict]:
         except Exception as e:
             print(f"[Tradier] Error fetching quote details batch: {e}")
     return out
+
+
+# ─── Market clock (holiday / half-day awareness) ───────────────────────────────
+# The executors' local market-hours guards only know weekday + time-of-day, so
+# on an exchange holiday (or after a 1pm half-day close) they would keep
+# scanning stale quotes and submitting orders into a closed market. The broker
+# knows the real session state — one cached read per TTL for the whole process.
+
+MARKET_CLOCK_TTL_SEC = 300   # one clock read per 5 min per process
+
+_clock_cache: dict = {"ts": 0.0, "clock": None}
+
+
+def get_market_clock() -> dict:
+    """
+    Tradier /markets/clock — the exchange's actual session state.
+
+    Returns e.g. {"state": "open"|"closed"|"premarket"|"postmarket",
+                  "date": ..., "description": ..., "next_change": ...}.
+    Cached for MARKET_CLOCK_TTL_SEC. MOCK_MODE or any error returns {} (and
+    does NOT poison the cache), so callers can fall back to their local check.
+    """
+    if MOCK_MODE:
+        return {}
+    now = time.time()
+    if _clock_cache["clock"] is not None and now - _clock_cache["ts"] < MARKET_CLOCK_TTL_SEC:
+        return _clock_cache["clock"]
+    try:
+        r = requests.get(f"{BASE_URL}/markets/clock", headers=HEADERS, timeout=10)
+        r.raise_for_status()
+        clock = r.json().get("clock", {}) or {}
+        if clock.get("state"):
+            _clock_cache.update({"ts": now, "clock": clock})
+        return clock
+    except Exception as e:
+        print(f"[Tradier] Error fetching market clock: {e}")
+        return {}
+
+
+def market_open_now() -> bool | None:
+    """
+    Is the equity session actually open right now, per the broker?
+
+    True/False from the clock; None when it can't be read (MOCK_MODE, network
+    error) — callers must treat None as "unknown" and fall back to their local
+    weekday+time guard, never as closed.
+    """
+    state = (get_market_clock().get("state") or "").strip().lower()
+    if not state:
+        return None
+    return state == "open"
 
 
 def get_chain_greeks(underlying: str, expiration: str) -> dict[str, dict]:

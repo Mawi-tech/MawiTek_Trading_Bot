@@ -69,7 +69,8 @@ def is_market_open(open_h: int, open_m: int, close_h: int, close_m: int,
                    now: datetime.datetime | None = None) -> bool:
     """
     True if `now` (default: now_est()) is a weekday within the [open, close]
-    window, with the window bounds given in US/Eastern.
+    window, with the window bounds given in US/Eastern. PURE — clock math only;
+    it does NOT know about exchange holidays (see is_market_session_open).
 
     Each strategy passes its own window (intraday strategies close earlier than
     swing strategies), so the bounds are parameters rather than constants here.
@@ -80,3 +81,28 @@ def is_market_open(open_h: int, open_m: int, close_h: int, close_m: int,
     open_t  = now.replace(hour=open_h,  minute=open_m,  second=0, microsecond=0)
     close_t = now.replace(hour=close_h, minute=close_m, second=0, microsecond=0)
     return open_t <= now <= close_t
+
+
+def is_market_session_open(open_h: int, open_m: int, close_h: int, close_m: int,
+                           now: datetime.datetime | None = None) -> bool:
+    """
+    is_market_open() AND the broker's live market clock.
+
+    The pure weekday+window check can't see exchange holidays or half-days
+    (July 4th, the 1pm close before Thanksgiving), so the trading loops used to
+    scan stale quotes and push orders into a closed market on those days. This
+    additionally asks Tradier's /markets/clock (TTL-cached in tradier_client,
+    ~one read per 5 min per process) whether the session is really open.
+
+    Fails OPEN: if the clock can't be read (MOCK_MODE, network error) the local
+    window check alone decides — behavior is then identical to is_market_open,
+    so a data problem never stops trading on a normal day.
+    """
+    if not is_market_open(open_h, open_m, close_h, close_m, now):
+        return False
+    try:
+        from tradier_client import market_open_now
+        per_broker = market_open_now()
+    except Exception:
+        return True
+    return True if per_broker is None else per_broker
