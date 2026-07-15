@@ -53,7 +53,7 @@ from risk_manager import (
 )
 from trade_journal import record_closed_trade
 from state_io import file_lock, atomic_write_json, read_json
-from utils import now_est, today_est
+from utils import now_est, today_est, is_market_session_open
 from heartbeat import beat
 
 
@@ -1557,9 +1557,8 @@ def run():
                 time.sleep(3600)
                 continue
 
-            market_open  = now.replace(hour=9,  minute=35, second=0, microsecond=0)
-            market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
-            if not (market_open <= now <= market_close):
+            # Weekday+window AND the broker clock (holidays / half-days).
+            if not is_market_session_open(9, 35, 15, 30, now):
                 print("[IVRank] Market closed - sleeping 60s")
                 beat("iv_rank_bot", status="idle")
                 time.sleep(60)

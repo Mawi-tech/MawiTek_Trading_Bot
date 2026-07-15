@@ -32,7 +32,7 @@ from logger import get_logger, log_trade
 from trade_journal import record_closed_trade
 from decision_log import log_decision, ACTION_TRADED, ACTION_REJECTED, ACTION_EXITED
 from heartbeat import beat
-from utils import now_est, today_est, parse_isodt, spread_pct as _spread_pct, is_market_open
+from utils import now_est, today_est, parse_isodt, spread_pct as _spread_pct, is_market_session_open
 
 log = get_logger("hft_executor")
 
@@ -714,7 +714,8 @@ def execute_hft_trade(setup: dict) -> bool:
 
 def _is_market_open() -> bool:
     # HFT's tradeable window ends at the EOD-flatten time, not the 15:55 close.
-    return is_market_open(MARKET_OPEN_H, MARKET_OPEN_M, EOD_FLATTEN_H, EOD_FLATTEN_M)
+    # Weekday+window AND the broker clock (holidays / half-days). Fails open.
+    return is_market_session_open(MARKET_OPEN_H, MARKET_OPEN_M, EOD_FLATTEN_H, EOD_FLATTEN_M)
 
 
 def _is_new_trade_allowed() -> bool:

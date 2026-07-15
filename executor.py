@@ -40,7 +40,7 @@ from position_manager import monitor_positions, record_entry
 from order_manager import place_and_confirm, recover_pending_orders
 from dashboard_state import write_dashboard_state
 from heartbeat import beat
-from utils import now_est, today_est
+from utils import now_est, today_est, is_market_session_open
 from decision_log import (
     log_decision,
     ACTION_TRADED, ACTION_REJECTED, ACTION_CONSIDERED,
@@ -68,13 +68,9 @@ MARKET_CLOSE_MIN  = 30   # Stop 30 min before close
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 
 def is_market_hours() -> bool:
-    now = now_est()
-    # Skip weekends
-    if now.weekday() >= 5:
-        return False
-    open_time  = now.replace(hour=MARKET_OPEN_HOUR,  minute=MARKET_OPEN_MIN,  second=0, microsecond=0)
-    close_time = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MIN, second=0, microsecond=0)
-    return open_time <= now <= close_time
+    # Weekday+window AND the broker clock (holidays / half-days). Fails open.
+    return is_market_session_open(MARKET_OPEN_HOUR, MARKET_OPEN_MIN,
+                                  MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN)
 
 
 def calculate_limit_price(mid: float) -> float:
