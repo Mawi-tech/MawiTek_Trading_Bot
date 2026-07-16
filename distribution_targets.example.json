@@ -1,0 +1,29 @@
+{
+  "_comment": "Copy this file to distribution_targets.json (gitignored) and fill in real values. Each target is one server/channel the signal feed broadcasts to. Add as many as you like. Filters (strategies / min_setup_score / min_conviction) are optional; omit them to receive everything. Only account-agnostic, sanitized signals are ever sent (no equity, dollars, sizes, or keys) — see signal_publisher.py.",
+  "targets": [
+    {
+      "id": "discord-public",
+      "type": "discord",
+      "webhook_url": "https://discord.com/api/webhooks/XXXX/YYYY",
+      "enabled": true,
+      "strategies": [],
+      "min_setup_score": 60,
+      "min_conviction": "medium"
+    },
+    {
+      "id": "discord-premium",
+      "type": "discord",
+      "webhook_url": "https://discord.com/api/webhooks/AAAA/BBBB",
+      "enabled": true
+    },
+    {
+      "id": "telegram-vip",
+      "type": "telegram",
+      "bot_token": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
+      "chat_id": "-1001234567890",
+      "enabled": true,
+      "strategies": ["pead", "iv_rank"],
+      "min_conviction": "high"
+    }
+  ]
+}

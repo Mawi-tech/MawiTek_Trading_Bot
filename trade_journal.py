@@ -23,6 +23,36 @@ from utils import now_est, today_est, parse_isodt
 CLOSED_TRADES_FILE = "closed_trades.json"
 
 
+def _broadcast_signals_async():
+    """
+    Fire-and-forget: broadcast newly-closed signals to the configured
+    distribution targets (Discord/Telegram servers) via signal_distributor.
+
+    Fully isolated from the trading path — runs in a daemon thread and NEVER
+    raises into the caller. No-ops (and does no feed rebuild) when no targets
+    are configured, so the common single-user case pays nothing. The distributor
+    dedups per target, so only the trade just recorded is actually sent.
+
+    Returns the Thread (or None) so tests can join it; callers ignore it.
+    """
+    def _run():
+        try:
+            from signal_distributor import load_targets, broadcast
+            if not load_targets():
+                return   # no signal service configured — skip entirely
+            broadcast()
+        except Exception as e:
+            print(f"[TradeJournal] Signal broadcast skipped (non-fatal): {e}")
+
+    try:
+        import threading
+        t = threading.Thread(target=_run, name="signal-broadcast", daemon=True)
+        t.start()
+        return t
+    except Exception:
+        return None
+
+
 def load_closed_trades() -> list[dict]:
     """Return the full closed-trade history (newest last)."""
     if not os.path.exists(CLOSED_TRADES_FILE):
@@ -121,6 +151,10 @@ def record_closed_trade(
             f"[TradeJournal] Recorded closed trade | {option_symbol} | "
             f"P&L: ${pnl_dollar:+,.2f} ({pnl_pct:+.1f}%) | Reason: {exit_reason}"
         )
+        # Trade is now in the journal → let the signal service broadcast it to
+        # every configured server. Best-effort, off-thread; never blocks or
+        # breaks the close if the feed/distributor has a problem.
+        _broadcast_signals_async()
     except Exception as e:
         print(f"[TradeJournal] Failed to write closed trade: {e}")
 
