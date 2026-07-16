@@ -4,7 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Backtest Results</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<!-- Chart.js vendored locally (chart.umd.js) — the dashboard server's strict CSP
+     (script-src 'self') blocks external CDN scripts, and a same-origin copy works
+     offline / over Tailscale. -->
+<script src="chart.umd.js"></script>
 <style>
   :root {
     --bg: #f5f5f3; --surface: #ffffff; --surface2: #f1efea;
