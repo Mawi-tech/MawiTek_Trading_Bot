@@ -4,7 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MawiTek — Options Bot</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<!-- Chart.js is vendored locally (chart.umd.js) rather than loaded from a CDN:
+     the dashboard server sends a strict CSP (script-src 'self'), so an external
+     CDN script is blocked and every chart silently dies. A same-origin copy also
+     means the dashboard works offline / over Tailscale with no internet. -->
+<script src="chart.umd.js"></script>
 <style>
 /* ── Tokens ──────────────────────────────────────────────────────────── */
 :root {
