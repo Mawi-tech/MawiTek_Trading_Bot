@@ -171,3 +171,28 @@ def test_strategy_panel_carries_unrealized(tmp_path, monkeypatch):
     by = {s["key"]: s for s in panel["strategies"]}
     assert by["catalyst_long_call"]["unrealized"] == 95
     assert panel["unrealized_unattributed"] == 0.0
+
+
+def test_deployed_capital_includes_iv_rank(tmp_path, monkeypatch):
+    """IV-Rank sells defined-risk spreads booked in iv_rank_positions.json. Its
+    deployed capital = max_risk × quantity (collateral), and must NOT be $0 while
+    positions are open. Regression: the reader for this book was missing, so the
+    Strategies tab showed 'Capital used $0' for held IV-Rank spreads."""
+    monkeypatch.chdir(tmp_path)
+    # Two open credit spreads: 3×$355 + 1×$420 = $1,485 collateral.
+    _write("iv_rank_positions.json", [
+        {"ticker": "NVDA", "strategy": "bull_put_spread", "quantity": 3, "max_risk": 355.0,
+         "legs": [{"side": "short", "entry_price": 2.1}, {"side": "long", "entry_price": 0.55}]},
+        {"ticker": "AMD", "strategy": "iron_condor", "quantity": 1, "max_risk": 420.0, "legs": []},
+    ])
+    dep = rm.deployed_capital_by_strategy()
+    assert dep.get("iv_rank") == 355.0 * 3 + 420.0 * 1  # 1485.0, not 0
+
+    # Legacy record without max_risk falls back to the long-leg debit (× qty × 100),
+    # so it still reports > $0 rather than silently dropping to zero.
+    _write("iv_rank_positions.json", [
+        {"ticker": "QQQ", "strategy": "bull_put_spread", "quantity": 2, "legs": [
+            {"side": "short", "entry_price": 3.0}, {"side": "long", "entry_price": 0.80}]},
+    ])
+    dep = rm.deployed_capital_by_strategy()
+    assert dep.get("iv_rank") == 0.80 * 2 * 100  # 160.0
