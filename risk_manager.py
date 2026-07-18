@@ -789,15 +789,19 @@ def deployed_capital_by_strategy() -> dict[str, float]:
     """
     Sum the cost basis of currently-open positions, grouped by strategy.
 
-    Reads the local position files:
-        open_positions.json   (catalyst + iv_rank if it records entries)
-        hft_positions.json    (intraday)
-        pead_positions.json   (post-earnings / news drift)
+    Reads every local strategy book:
+        open_positions.json        (catalyst long options)
+        hft_positions.json         (intraday 0-DTE)
+        vwap_fade_positions.json   (intraday VWAP fade)
+        pead_positions.json        (post-earnings / news drift)
+        bounce_positions.json      (capitulation bounce)
+        iv_rank_positions.json     (defined-risk credit spreads)
 
-    Cost basis per leg = entry_price × |quantity| × 100. Returns
-    {strategy: dollars_deployed}. Strategies whose positions aren't tracked
-    locally (e.g. broker-only spread legs) won't be fully counted — the cap
-    is best-effort for those.
+    Long-option books use entry_price × |quantity| × 100 (the debit paid).
+    IV-Rank sells net-credit spreads, so it uses max_risk × |quantity| (the
+    collateral / max loss). Returns {strategy: dollars_deployed}. Strategies
+    whose positions aren't tracked locally (e.g. broker-only legs) won't be
+    fully counted — the cap is best-effort for those.
     """
     from collections import defaultdict
     out: dict[str, float] = defaultdict(float)
@@ -855,6 +859,32 @@ def deployed_capital_by_strategy() -> dict[str, float]:
                 out["bounce"] += px * qty * 100
     except Exception as e:
         print(f"[RiskManager] deployed_capital: could not read bounce_positions: {e}")
+
+    # IV-Rank sells DEFINED-RISK spreads (bull-put / bear-call / iron condor),
+    # so the capital tied up isn't a debit paid — it's the collateral / max loss
+    # (width − credit), stored per-contract as `max_risk`. entry_price × qty would
+    # be meaningless for a net-credit structure, which is why iv_rank must be read
+    # here explicitly rather than lumped in with the long-option books above.
+    # Without this block iv_rank always reported $0 deployed even while holding
+    # open spreads.
+    try:
+        if os.path.exists("iv_rank_positions.json"):
+            with open("iv_rank_positions.json", "r") as f:
+                ivr = json.load(f)
+            for p in (ivr if isinstance(ivr, list) else []):
+                qty      = abs(int(p.get("quantity", 0) or 0))
+                max_risk = float(p.get("max_risk", 0) or 0)   # per-contract $ collateral
+                if max_risk > 0:
+                    out["iv_rank"] += max_risk * qty
+                else:
+                    # Legacy record without max_risk: fall back to the debit paid
+                    # on the long legs. Under-counts a credit spread but beats $0.
+                    long_debit = sum(float(l.get("entry_price", 0) or 0)
+                                     for l in p.get("legs", [])
+                                     if l.get("side") == "long")
+                    out["iv_rank"] += long_debit * qty * 100
+    except Exception as e:
+        print(f"[RiskManager] deployed_capital: could not read iv_rank_positions: {e}")
 
     return dict(out)
 
