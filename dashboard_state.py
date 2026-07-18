@@ -18,6 +18,7 @@ import datetime
 import os
 import re
 import time
+import traceback
 
 from tradier_client import (
     get_account_balance, get_open_positions, get_orders_today,
@@ -874,6 +875,28 @@ def _safe_drawdown_status(equity: float) -> dict | None:
         return None
 
 
+def _safe_section(label, fn, fallback, errors):
+    """
+    Run one dashboard section builder in isolation.
+
+    The dashboard is assembled from ~20 independent feeds (balances, positions,
+    trades, greeks, news, ...). Historically the whole build sat in a single
+    try/except, so one failing feed aborted the entire write and left
+    dashboard_state.json empty — every panel went blank at once. This wrapper
+    keeps each section independent: on failure it logs the full traceback,
+    records the section name in `errors`, and returns `fallback` so the rest of
+    the dashboard still renders. Modifying one section can no longer break the
+    others.
+    """
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001 - deliberately broad; one feed must not sink the rest
+        errors.append(label)
+        print(f"[Dashboard] Section '{label}' failed: {e}")
+        traceback.print_exc()
+        return fallback
+
+
 def write_dashboard_state(
     setups: list[dict] | None = None,
     bot_status: str = "running",
@@ -888,161 +911,188 @@ def write_dashboard_state(
         bot_status:   "running", "halted", "scanning", "idle"
         account_mode: "paper" or "live"
     """
-    try:
-        balances   = get_account_balance()
-        equity     = balances.get("total_equity", 0)
-        risk_state = load_state()
+    errors: list[str] = []
 
-        # Account-size tier config (tiers + dashboard overrides) — drives the
-        # account caps below and feeds the dashboard's Settings form. Best-effort:
-        # a config error must never stop the state write, so fall back to None.
-        try:
-            from user_config import (effective_config, load_user_config,
-                                     alert_config, TIER_PRESETS, TIER_THRESHOLDS)
-            cfg = effective_config(equity)
-        except Exception as e:
-            print(f"[Dashboard] Could not resolve tier config (non-fatal): {e}")
-            cfg = None
+    # ── Foundation feeds ─────────────────────────────────────────────────────
+    # Everything downstream derives from account equity + risk state, so these
+    # get guarded fallbacks (equity 0, empty risk state) rather than aborting
+    # the whole write. A failure here still yields a valid, clearly-degraded
+    # state file instead of a blank one.
+    balances   = _safe_section("account_balance", get_account_balance, {}, errors)
+    equity     = float(balances.get("total_equity", 0) or 0)
+    risk_state = _safe_section("risk_state", load_state, {}, errors)
 
-        daily_pnl     = round(risk_state.get("realized_pnl", 0.0), 2)
-        trades_today  = risk_state.get("trades_today", 0)
-        halted        = risk_state.get("halted", False)
-        loss_limit    = round(equity * DAILY_LOSS_LIMIT_PCT, 2)
-        loss_used_pct = round(abs(daily_pnl) / loss_limit * 100, 1) if loss_limit > 0 and daily_pnl < 0 else 0
-
-        positions, open_count = build_positions_data()
-        tag_positions_with_strategy(positions)   # attach pos["strategy"] for per-strategy views
-        trades        = build_trades_data()
-        pnl_history   = build_pnl_history()
-
-        # Derive swing/day split from the positions already fetched so the
-        # sub-totals always add up to open_count (no mismatch with broker-only
-        # positions that count_positions_by_type wouldn't see).
-        swing_count = sum(1 for p in positions if p["dte"] > DAY_TRADE_MAX_DTE)
-        day_count   = sum(1 for p in positions if p["dte"] <= DAY_TRADE_MAX_DTE)
-
-        # Keep the last real scan's setups visible instead of blanking the card
-        # every idle/scanning cycle. Saves fresh setups; restores them when empty.
-        setups, setups_updated = _persist_or_restore_setups(setups)
-
-        # Attach IV context (cheap/rich vol regime) to setups — informational, so
-        # you can see whether each name's options are expensive. Day-cached, with a
-        # bounded number of new broker reads per cycle.
-        setups = _enrich_setups_with_iv(setups)
-
-        # Track each surfaced setup's forward return (did the scanner pick movers?)
-        # and aggregate the scanner's hit-rate-by-score. Best-effort + never blocks.
-        try:
-            from setup_tracker import track_and_persist, scanner_performance
-            setups = track_and_persist(setups)
-            scanner_perf = scanner_performance(setups)
-        except Exception as e:
-            print(f"[Dashboard] Scanner-performance tracking failed (non-fatal): {e}")
-            scanner_perf = {}
-
-        # Filter pass rate stats
-        filter_stats = {"earnings": 0, "flow": 0, "news": 0, "momentum": 0, "total": 0}
-        if setups:
-            filter_stats["total"] = len(setups)
-            for s in setups:
-                if s.get("days_until_earnings") is not None: filter_stats["earnings"] += 1
-                if s.get("options_flow"):                    filter_stats["flow"] += 1
-                if s.get("news_catalyst"):                   filter_stats["news"] += 1
-                if s.get("momentum_score", 0) >= 40:        filter_stats["momentum"] += 1
-
-        def pct(n, total):
-            return round(n / total * 100) if total > 0 else 0
-
-        closed_trades  = load_closed_trades()
-        strategy_panel = build_strategy_panel(equity, closed_trades, positions)
-
-        # All-time P&L for the Overview headline: realized = every closed trade in
-        # the journal (the same authoritative, uncapped source the Strategies tab
-        # and Analytics metrics use, so the figures reconcile) + unrealized =
-        # current mark-to-market on open positions, plus each figure as a % return
-        # on the account's starting capital (the first equity-curve snapshot).
-        equity_curve = load_equity_curve()
-        start_equity = float(equity_curve[0].get("equity", 0) or 0) if equity_curve else 0.0
-        pnl_summary  = compute_pnl_summary(closed_trades, positions, start_equity)
-
-        # Net option greeks across the whole book (delta/gamma/theta/vega).
-        # Also caches net vega for the risk manager's portfolio-vega limit.
-        try:
-            from portfolio_greeks import compute_portfolio_greeks
-            greeks = compute_portfolio_greeks(positions)
-            greeks["vega_limit"] = round(equity * VEGA_LIMIT_PCT, 2)
-        except Exception as e:
-            print(f"[Dashboard] Could not compute portfolio greeks: {e}")
-            greeks = {}
-
-        state = {
-            # ET-anchored — the dashboard renders this timestamp next to a
-            # "last update" indicator, and stale-bar math expects ET.
-            "timestamp":    now_est().isoformat(),
-            "account_mode": account_mode,
-            "bot_status":   "halted" if halted else bot_status,
-            # How often the bot is expected to rewrite this file (≈ the catalyst
-            # scan cadence: 5 min while open, 30 min after hours). The dashboard
-            # uses this so a normal slow-cadence write isn't flagged as "stale".
-            "update_interval_sec": 1800 if bot_status in ("scanning_closed", "idle") else 300,
-            "account": {
-                "equity":          round(equity, 2),
-                "daily_pnl":       daily_pnl,
-                "daily_pnl_pct":   round(daily_pnl / equity * 100, 2) if equity > 0 else 0,
-                "loss_limit":      loss_limit,
-                "loss_used":       abs(daily_pnl) if daily_pnl < 0 else 0,
-                "loss_used_pct":   loss_used_pct,
-                "open_positions":  open_count,
-                "max_positions":   (cfg["max_swing_positions"] + cfg["max_day_positions"]) if cfg else MAX_OPEN_POSITIONS,
-                "swing_positions": swing_count,
-                "max_swing":       cfg["max_swing_positions"] if cfg else MAX_SWING_POSITIONS,
-                "day_positions":   day_count,
-                "max_day":         cfg["max_day_positions"] if cfg else MAX_DAY_POSITIONS,
-                "trades_today":    trades_today,
-                "halted":          halted,
-                # Drawdown governor: peak-to-current drawdown, rolling week, and
-                # whether new entries are being de-risked or halted to protect
-                # profits from a slow bleed the daily halt misses. Best-effort.
-                "drawdown":        _safe_drawdown_status(equity),
-            },
-            # Active tier config + presets + thresholds for the Settings form.
-            "config": ({
-                "effective":  cfg,
-                "raw":        load_user_config(),
-                "tiers":      TIER_PRESETS,
-                "thresholds": TIER_THRESHOLDS,
-                "alerts":     alert_config(),
-            } if cfg else {}),
-            "pnl_summary": pnl_summary,
-            "positions":   positions,
-            "trades":      trades,
-            "pnl_history": pnl_history,
-            "setups":      setups or [],
-            "setups_updated": setups_updated,
-            "scanner_perf": scanner_perf,
-            "filter_stats": {
-                "earnings_pct":  pct(filter_stats["earnings"],  filter_stats["total"]),
-                "flow_pct":      pct(filter_stats["flow"],      filter_stats["total"]),
-                "news_pct":      pct(filter_stats["news"],      filter_stats["total"]),
-                "momentum_pct":  pct(filter_stats["momentum"],  filter_stats["total"]),
-            },
-            "trade_history": _merged_trade_history(),
-            "decision_log":  load_recent_decisions(limit=200),
-            "equity_curve":  equity_curve[-500:],
-            "metrics":       compute_metrics(equity_curve, closed_trades),
-            "strategy_panel": strategy_panel,
-            "greeks":         greeks,
-            "events":         build_events(),
-            "alerts":         _alert_channel_status(),
-            "news":           build_news(),
-            "social":         build_social(),
+    # Account-size tier config (tiers + dashboard overrides) — drives the account
+    # caps below and feeds the Settings form. Whole block is one guarded unit.
+    def _resolve_config():
+        from user_config import (effective_config, load_user_config,
+                                 alert_config, TIER_PRESETS, TIER_THRESHOLDS)
+        return {
+            "effective":  effective_config(equity),
+            "raw":        load_user_config(),
+            "tiers":      TIER_PRESETS,
+            "thresholds": TIER_THRESHOLDS,
+            "alerts":     alert_config(),
         }
+    config_block = _safe_section("config", _resolve_config, {}, errors)
+    cfg = (config_block or {}).get("effective")
 
-        # Atomic write so the dashboard (and any other process) never reads a
-        # half-written state file.
+    daily_pnl     = round(float(risk_state.get("realized_pnl", 0.0) or 0.0), 2)
+    trades_today  = risk_state.get("trades_today", 0)
+    halted        = bool(risk_state.get("halted", False))
+    loss_limit    = round(equity * DAILY_LOSS_LIMIT_PCT, 2)
+    loss_used_pct = round(abs(daily_pnl) / loss_limit * 100, 1) if loss_limit > 0 and daily_pnl < 0 else 0
+
+    # ── Positions / trades / rolling P&L ─────────────────────────────────────
+    positions, open_count = _safe_section("positions", build_positions_data, ([], 0), errors)
+    _safe_section("positions_strategy_tag",
+                  lambda: tag_positions_with_strategy(positions), None, errors)
+    trades      = _safe_section("trades", build_trades_data, [], errors)
+    pnl_history = _safe_section("pnl_history", build_pnl_history, [], errors)
+
+    # Derive swing/day split from the positions already fetched so the sub-totals
+    # always add up to open_count (no mismatch with broker-only positions).
+    swing_count = sum(1 for p in positions if p.get("dte", 0) > DAY_TRADE_MAX_DTE)
+    day_count   = sum(1 for p in positions if p.get("dte", 0) <= DAY_TRADE_MAX_DTE)
+
+    # ── Scanner setups pipeline ──────────────────────────────────────────────
+    # Keep the last real scan's setups visible instead of blanking the card every
+    # idle/scanning cycle. Saves fresh setups; restores them when empty.
+    setups, setups_updated = _safe_section(
+        "setups_persist", lambda: _persist_or_restore_setups(setups),
+        (setups or [], None), errors)
+    # Attach IV context (cheap/rich vol regime) — informational, day-cached.
+    setups = _safe_section("setups_iv", lambda: _enrich_setups_with_iv(setups),
+                           setups, errors)
+
+    # Track each surfaced setup's forward return and aggregate hit-rate-by-score.
+    def _scanner_perf():
+        from setup_tracker import track_and_persist, scanner_performance
+        tracked = track_and_persist(setups)
+        return tracked, scanner_performance(tracked)
+    setups, scanner_perf = _safe_section("scanner_perf", _scanner_perf,
+                                         (setups, {}), errors)
+
+    # Filter pass-rate stats (raw counts; percentaged into the state below).
+    def _filter_stats():
+        fs = {"earnings": 0, "flow": 0, "news": 0, "momentum": 0, "total": len(setups)}
+        for s in setups:
+            if s.get("days_until_earnings") is not None: fs["earnings"] += 1
+            if s.get("options_flow"):                    fs["flow"] += 1
+            if s.get("news_catalyst"):                   fs["news"] += 1
+            if s.get("momentum_score", 0) >= 40:         fs["momentum"] += 1
+        return fs
+    filter_raw = _safe_section("filter_stats", _filter_stats,
+                               {"earnings": 0, "flow": 0, "news": 0, "momentum": 0, "total": 0},
+                               errors)
+
+    def pct(n, total):
+        return round(n / total * 100) if total > 0 else 0
+
+    # ── P&L summary, strategy panel, metrics, greeks ─────────────────────────
+    closed_trades  = _safe_section("closed_trades", load_closed_trades, [], errors)
+    strategy_panel = _safe_section(
+        "strategy_panel",
+        lambda: build_strategy_panel(equity, closed_trades, positions), {}, errors)
+
+    # All-time P&L for the Overview headline: realized (every closed trade) +
+    # unrealized (mark-to-market on open positions), each as a % of starting
+    # capital (the first equity-curve snapshot).
+    equity_curve = _safe_section("equity_curve", load_equity_curve, [], errors)
+    start_equity = float(equity_curve[0].get("equity", 0) or 0) if equity_curve else 0.0
+    pnl_summary  = _safe_section(
+        "pnl_summary",
+        lambda: compute_pnl_summary(closed_trades, positions, start_equity),
+        compute_pnl_summary([], [], None), errors)
+
+    # Net option greeks across the whole book; also caches net vega for the risk
+    # manager's portfolio-vega limit.
+    def _greeks():
+        from portfolio_greeks import compute_portfolio_greeks
+        g = compute_portfolio_greeks(positions)
+        g["vega_limit"] = round(equity * VEGA_LIMIT_PCT, 2)
+        return g
+    greeks = _safe_section("greeks", _greeks, {}, errors)
+
+    # ── Remaining independent feeds ──────────────────────────────────────────
+    trade_history = _safe_section("trade_history", _merged_trade_history, [], errors)
+    decision_log  = _safe_section("decision_log", lambda: load_recent_decisions(limit=200), [], errors)
+    metrics       = _safe_section("metrics", lambda: compute_metrics(equity_curve, closed_trades), {}, errors)
+    events        = _safe_section("events", build_events, [], errors)
+    alerts        = _safe_section("alerts", _alert_channel_status, {}, errors)
+    news          = _safe_section("news", build_news, [], errors)
+    social        = _safe_section("social", build_social, [], errors)
+    drawdown      = _safe_section("drawdown", lambda: _safe_drawdown_status(equity), {}, errors)
+
+    # ── Assemble + write ─────────────────────────────────────────────────────
+    state = {
+        # ET-anchored — the dashboard renders this timestamp next to a "last
+        # update" indicator, and stale-bar math expects ET.
+        "timestamp":    now_est().isoformat(),
+        "account_mode": account_mode,
+        "bot_status":   "halted" if halted else bot_status,
+        # How often the bot is expected to rewrite this file (~the catalyst scan
+        # cadence: 5 min while open, 30 min after hours) so a normal slow-cadence
+        # write isn't flagged as "stale".
+        "update_interval_sec": 1800 if bot_status in ("scanning_closed", "idle") else 300,
+        "account": {
+            "equity":          round(equity, 2),
+            "daily_pnl":       daily_pnl,
+            "daily_pnl_pct":   round(daily_pnl / equity * 100, 2) if equity > 0 else 0,
+            "loss_limit":      loss_limit,
+            "loss_used":       abs(daily_pnl) if daily_pnl < 0 else 0,
+            "loss_used_pct":   loss_used_pct,
+            "open_positions":  open_count,
+            "max_positions":   (cfg["max_swing_positions"] + cfg["max_day_positions"]) if cfg else MAX_OPEN_POSITIONS,
+            "swing_positions": swing_count,
+            "max_swing":       cfg["max_swing_positions"] if cfg else MAX_SWING_POSITIONS,
+            "day_positions":   day_count,
+            "max_day":         cfg["max_day_positions"] if cfg else MAX_DAY_POSITIONS,
+            "trades_today":    trades_today,
+            "halted":          halted,
+            # Drawdown governor: peak-to-current drawdown + de-risk/halt state.
+            "drawdown":        drawdown,
+        },
+        # Active tier config + presets + thresholds for the Settings form.
+        "config":         config_block or {},
+        "pnl_summary":    pnl_summary,
+        "positions":      positions,
+        "trades":         trades,
+        "pnl_history":    pnl_history,
+        "setups":         setups or [],
+        "setups_updated": setups_updated,
+        "scanner_perf":   scanner_perf,
+        "filter_stats": {
+            "earnings_pct":  pct(filter_raw["earnings"],  filter_raw["total"]),
+            "flow_pct":      pct(filter_raw["flow"],      filter_raw["total"]),
+            "news_pct":      pct(filter_raw["news"],      filter_raw["total"]),
+            "momentum_pct":  pct(filter_raw["momentum"],  filter_raw["total"]),
+        },
+        "trade_history":  trade_history,
+        "decision_log":   decision_log,
+        "equity_curve":   equity_curve[-500:],
+        "metrics":        metrics,
+        "strategy_panel": strategy_panel,
+        "greeks":         greeks,
+        "events":         events,
+        "alerts":         alerts,
+        "news":           news,
+        "social":         social,
+        # Which sections degraded this cycle. Empty list = every feed succeeded.
+        # Additive field: existing dashboard consumers ignore unknown keys.
+        "errors":         errors,
+    }
+
+    # Atomic write so the dashboard never reads a half-written file. The build
+    # above already isolated every feed, so we always have a coherent state to
+    # write — even if some sections fell back to their defaults.
+    try:
         atomic_write_json(STATE_FILE, state)
-
-        print(f"[Dashboard] State written -> {STATE_FILE}")
-
+        if errors:
+            print(f"[Dashboard] State written with {len(errors)} degraded section(s): "
+                  f"{', '.join(errors)} -> {STATE_FILE}")
+        else:
+            print(f"[Dashboard] State written -> {STATE_FILE}")
     except Exception as e:
-        print(f"[Dashboard] Error writing state: {e}")
+        print(f"[Dashboard] CRITICAL: could not write state file: {e}")
+        traceback.print_exc()
