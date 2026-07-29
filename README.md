@@ -209,7 +209,7 @@ python dashboard_server.py
 | **Watchdog** | Each strategy writes a heartbeat; `start_all.py` alerts when a process dies **or** stalls (alive but hung, e.g. wedged network call). |
 | **Daily summary** | `daily_report.py` sends an end-of-day digest (P&L, trades, halts, overnight exposure). Auto-fires after the close; or run `python daily_report.py`. |
 | **Timezone safety** | All "today" / "now" comparisons go through `utils.now_est()` / `utils.today_est()` — the bot agrees with the market on what day it is regardless of where the host runs. |
-| **Dashboard server** | `dashboard_server.py` enforces a file allowlist (`.html / .css / .js / dashboard_state.json / backtest_equity.json / news_feed.json / social_sentiment.json`) so the static server can't accidentally serve `.env` or other state files. Optional HTTP Basic Auth (`DASH_AUTH_USER`/`DASH_AUTH_PASS`). Loopback-only by default. |
+| **Dashboard server** | `dashboard_server.py` enforces a file allowlist (`.html / .css / .js / dashboard_state.json / backtest_equity.json / news_feed.json / social_sentiment.json`) so the static server can't accidentally serve `.env` or other state files. Optional HTTP Basic Auth (`DASH_AUTH_USER`/`DASH_AUTH_PASS`). Loopback-only by default, and it **refuses to start** on a non-loopback `--bind` unless both auth variables are set — an exposed `/api/control` is a kill switch. |
 | **CSRF-proof control API** | `POST /api/config` and `/api/control` require `Content-Type: application/json` (forcing any cross-origin call into a preflight that never succeeds), reject a cross-site `Sec-Fetch-Site` or mismatched `Origin`, and pin `Host` to loopback to close DNS rebinding — so no page the operator happens to visit can halt or flatten the account. |
 
 ## Analysis Tools
