@@ -87,7 +87,11 @@ class FillResult:
 # ─── Pending-order ledger (atomic) ────────────────────────────────────────────
 
 def _load_pending() -> dict:
-    data = read_json(PENDING_FILE, {})
+    # strict: this ledger is the only record of orders that were submitted but
+    # not yet confirmed. Reading a corrupt one as {} would tell recovery there
+    # is nothing in flight, orphaning a real fill at the broker with no local
+    # position and no exit management.
+    data = read_json(PENDING_FILE, {}, strict=True)
     return data if isinstance(data, dict) else {}
 
 

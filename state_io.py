@@ -32,12 +32,26 @@ This module fixes both:
 
   * update_json()        — lock + read + mutate + atomic-write + unlock, the
     safe primitive for counters and append-only lists.
+
+FAIL-CLOSED READS
+-----------------
+Atomic writes close the path that CREATES corruption. The read path used to
+reopen the same failure: read_json swallowed every exception and returned
+`default`, so a corrupt risk_state.json silently became {} — halt flag gone,
+trades_today reset, daily P&L reset — and the bot happily kept trading.
+
+`strict=True` makes an unparseable file raise StateCorruption instead. Callers
+that own a safety-critical file (risk_state.json, pending_orders.json) pass it;
+a blank risk state is far more dangerous than a stopped bot. Either way the bad
+file is renamed to `<path>.corrupt.<unix_ts>` so the evidence survives and the
+next write starts from clean ground.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import contextlib
 from typing import Any, Callable
@@ -73,14 +87,69 @@ def atomic_write_json(path: str, data: Any) -> None:
         raise
 
 
-def read_json(path: str, default: Any = None) -> Any:
-    """Read JSON from `path`, returning `default` on any error/missing file."""
+class StateCorruption(RuntimeError):
+    """A state file exists but could not be read or parsed.
+
+    Distinct from "file missing", which is a legitimate first run and always
+    yields `default`. This means bytes are on disk that we cannot trust.
+    """
+
+
+def _quarantine(path: str) -> str | None:
+    """
+    Rename an unreadable state file aside so it can be inspected later.
+
+    Deleting it would destroy the only evidence of what went wrong, and leaving
+    it in place would make every subsequent read fail identically. Moving it
+    does both jobs: the next write starts clean, and a post-mortem still has
+    the bytes. Returns the new path, or None if the rename didn't happen.
+    """
+    dest = f"{path}.corrupt.{int(time.time())}"
+    try:
+        os.replace(path, dest)
+        return dest
+    except OSError:
+        # Another process may have already quarantined or replaced it, or the
+        # file is locked. Not worth failing over — the caller is already on an
+        # error path and `strict` decides what happens next.
+        return None
+
+
+def read_json(path: str, default: Any = None, *, strict: bool = False) -> Any:
+    """
+    Read JSON from `path`.
+
+    Missing file           → `default` (a legitimate first run).
+    Present but unreadable → quarantined to `<path>.corrupt.<unix_ts>`, then
+                             StateCorruption if `strict`, else `default`.
+
+    `strict` defaults to False so existing callers are unaffected. Pass it for
+    any file whose absence changes a safety decision — silently substituting {}
+    for a corrupt risk_state.json is how a daily-loss halt disappears.
+    """
     if not os.path.exists(path):
         return default
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
+            raw = f.read()
+    except FileNotFoundError:
+        # Raced with a rename or delete between the exists() check and the
+        # open(). Nothing is corrupt — treat it as the missing-file case.
+        return default
+    except OSError as e:
+        # Locked, permission-denied, bad sector. The content may be perfectly
+        # fine, so don't quarantine — but don't pretend it's empty either.
+        if strict:
+            raise StateCorruption(f"could not read {path}: {e}") from e
+        return default
+
+    try:
+        return json.loads(raw)
+    except ValueError as e:
+        dest = _quarantine(path)
+        detail = f"quarantined to {dest}" if dest else "could not be quarantined"
+        if strict:
+            raise StateCorruption(f"{path} is not valid JSON ({e}); {detail}") from e
         return default
 
 
@@ -149,6 +218,8 @@ def update_json(
     mutator: Callable[[Any], Any],
     default: Any = None,
     timeout: float = 10.0,
+    *,
+    strict: bool = False,
 ) -> Any:
     """
     Safely read-modify-write a JSON file across processes.
@@ -156,13 +227,50 @@ def update_json(
     Acquires the lock, reads the current value (or `default`), passes it to
     `mutator`, atomically writes whatever the mutator returns, and returns it.
 
+    `strict` is forwarded to read_json: with it set, a corrupt file raises
+    StateCorruption instead of feeding `default` to the mutator — which would
+    otherwise quietly rebuild the file from nothing, erasing whatever the
+    corrupt copy was supposed to be protecting.
+
     Example — increment a counter without losing updates:
         update_json("risk_state.json",
                     lambda s: {**s, "trades_today": s.get("trades_today", 0) + 1},
-                    default={})
+                    default={}, strict=True)
     """
     with file_lock(path, timeout=timeout):
-        current = read_json(path, default)
+        current = read_json(path, default, strict=strict)
         new_value = mutator(current)
         atomic_write_json(path, new_value)
         return new_value
+
+
+def abort_on_corruption(exc: StateCorruption, component: str) -> None:
+    """
+    Report a fatal state corruption on every channel available, then exit(1).
+
+    Called from a strategy's startup path. The alert matters more than the log
+    here: the strategies run headless under start_all.py, so a message that only
+    reaches a log file is a message the operator reads tomorrow — by which point
+    they have spent a session believing a halted bot was trading, or the reverse.
+
+    event_notifier is imported lazily and best-effort. state_io is a leaf module
+    that everything else depends on, so a module-level import would invert the
+    dependency; and a notifier that is down must not swallow the exit.
+    """
+    from logger import get_logger
+    get_logger("state_io").error("FATAL — corrupt state file in %s: %s", component, exc)
+    print(f"\n[{component}] FATAL: {exc}", file=sys.stderr)
+    print(f"[{component}] Refusing to start on unreadable state. Inspect the "
+          f".corrupt.* file, fix or remove it, then restart.\n", file=sys.stderr)
+    try:
+        from event_notifier import _dispatch
+        _dispatch(
+            subject=f"State corruption — {component} will not start",
+            lines=[f"{component} found an unreadable state file and exited.",
+                   f"Detail: {exc}",
+                   "No positions are being managed by this strategy until it restarts."],
+            severity="danger",
+        )
+    except Exception as e:  # noqa: BLE001 — never let the alert mask the exit
+        print(f"[{component}] could not send corruption alert: {e}", file=sys.stderr)
+    sys.exit(1)
