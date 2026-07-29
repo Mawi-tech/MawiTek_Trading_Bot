@@ -77,6 +77,28 @@ def _log():
 
 # ─── Atomic write / safe read ─────────────────────────────────────────────────
 
+def _fsync_dir(directory: str) -> None:
+    """
+    Flush the directory entry so a completed rename survives power loss.
+
+    os.replace is atomic — a reader sees the old file or the new one, never a
+    mix — but atomic is not the same as durable. Until the directory metadata
+    reaches the platter, a hard power cut can leave the rename undone even
+    though the write returned. Best-effort: Windows has no directory fd, and
+    some filesystems reject O_RDONLY on a directory.
+    """
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def atomic_write_json(path: str, data: Any) -> None:
     """
     Write `data` as JSON to `path` atomically.
@@ -98,6 +120,7 @@ def atomic_write_json(path: str, data: Any) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        _fsync_dir(directory)
     except Exception:
         with contextlib.suppress(Exception):
             if os.path.exists(tmp):
@@ -332,6 +355,45 @@ def update_json(
         new_value = mutator(current)
         atomic_write_json(path, new_value)
         return new_value
+
+
+def sweep_stale_temp_files(directory: str, older_than: float = 3600.0) -> list[str]:
+    """
+    Delete orphaned `*.tmp` files left behind in `directory`.
+
+    atomic_write_json removes its own temp file on failure, but a process that
+    is killed between the write and the os.replace cannot. Those orphans are
+    invisible to every reader and accumulate one per crash forever.
+
+    Only `*.tmp` is touched, and only past `older_than` seconds — a temp file
+    from an atomic_write_json running right now is milliseconds old, so the age
+    floor is what keeps this from racing a live writer. Call it once at startup,
+    never on a loop. Returns the paths removed.
+    """
+    removed: list[str] = []
+    cutoff = time.time() - older_than
+    try:
+        names = os.listdir(directory)
+    except OSError as e:
+        _log().warning("Could not sweep temp files in %s: %s", directory, e)
+        return removed
+
+    for name in names:
+        if not name.endswith(".tmp"):
+            continue
+        full = os.path.join(directory, name)
+        try:
+            if not os.path.isfile(full) or os.path.getmtime(full) > cutoff:
+                continue
+            os.remove(full)
+            removed.append(full)
+        except OSError:
+            # Vanished under us, or locked. Either way the next sweep gets it.
+            continue
+
+    if removed:
+        _log().info("Swept %d orphaned temp file(s) from %s", len(removed), directory)
+    return removed
 
 
 def abort_on_corruption(exc: StateCorruption, component: str) -> None:

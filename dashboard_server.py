@@ -192,7 +192,11 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         # these headers add defence-in-depth against clickjacking and MIME sniffing.
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
-        self.send_header("X-XSS-Protection", "1; mode=block")
+        # Explicitly 0, not "1; mode=block". The legacy auditor is deprecated,
+        # and its blocking mode has known bypasses that can introduce
+        # vulnerabilities on pages that would otherwise be safe. Current
+        # guidance is to disable it and rely on the CSP below.
+        self.send_header("X-XSS-Protection", "0")
         # CSP backstop: the dashboards fetch only same-origin JSON and render no
         # remote resources. Pinning to 'self' (plus the inline styles/scripts the
         # single-file dashboard relies on) contains any content injected via an
@@ -234,8 +238,16 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             user, _, pw = base64.b64decode(header[6:]).decode("utf-8", "replace").partition(":")
         except Exception:
             return False
-        # constant-time compare to avoid leaking length/content via timing
-        return hmac.compare_digest(user, _AUTH_USER) and hmac.compare_digest(pw, _AUTH_PASS)
+        # Compare UTF-8 bytes: hmac.compare_digest raises TypeError on a str
+        # containing non-ASCII, so a passphrase with an accented character would
+        # otherwise 500 instead of cleanly denying.
+        #
+        # Both comparisons run unconditionally — `and` would short-circuit on a
+        # wrong username and skip the password compare, making a VALID username
+        # measurably slower and therefore guessable.
+        user_ok = hmac.compare_digest(user.encode("utf-8"), _AUTH_USER.encode("utf-8"))
+        pass_ok = hmac.compare_digest(pw.encode("utf-8"), _AUTH_PASS.encode("utf-8"))
+        return user_ok & pass_ok
 
     def _send_auth_challenge(self) -> None:
         self.send_response(401)

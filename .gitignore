@@ -35,6 +35,11 @@ last_summary.json
 scanner_setups.json
 heartbeats/
 *.lock
+# Orphaned temp files from an interrupted atomic write, and state files
+# quarantined by read_json because they would not parse — both are incident
+# artefacts of one machine, never source.
+*.tmp
+*.corrupt.*
 
 # ── Quarantined files pending deletion ───────────────────────────────────
 _REMOVE_ME/
