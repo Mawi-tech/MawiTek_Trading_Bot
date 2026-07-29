@@ -192,6 +192,14 @@ direction-blind and would kill the oversold-flush CALL fade, which is exactly a 
   read strictly, because `default` for those means *halt flag gone, P&L zeroed* and *nothing in flight*
   respectively. Each strategy's startup catches `StateCorruption` **before** its non-fatal catch-all and calls
   `state_io.abort_on_corruption`, which logs at ERROR, fires an `event_notifier` alert, and exits 1.
+  **Lock ownership:** the lock file carries a `<pid>:<uuid4>` token, unique per *acquisition*. Release removes
+  the file only if it still holds that token (so a holder whose lock was broken as stale can't delete the new
+  owner's), and a stale lock is removed only if its contents are unchanged between the staleness check and the
+  removal (closing the TOCTOU where two processes both break and both acquire). A hold longer than
+  `stale_after / 2` logs a warning. **Rule: never do network or broker I/O inside an `update_json` mutator** —
+  a wedged HTTP call outlasts `stale_after` and gets the lock broken underneath the holder. Intended future
+  work: OS-level locking (`fcntl.flock` / `msvcrt.locking`), where the kernel releases on process death and
+  the stale-lock concept — and both races with it — disappear.
 - **`position_book.py`** — shared single-leg book logic (`load/save/add/remove/update`) for Strategies 3–5,
   bound per strategy to its own file. (Consolidated from three identical copies.)
 - **`trade_journal.py`** — appends closed trades (with computed or supplied P&L, `strategy`, `trade_type`)
