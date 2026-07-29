@@ -46,17 +46,28 @@ own signed-in devices — it is **never exposed to the public internet**.
    `https://your-machine.your-tailnet.ts.net/dashboard.html`. Stop with
    `tailscale serve reset`.
 
-### Recommended either way — require a login
+### Required either way — set a login
 
-Set a dashboard password in `.env` (HTTP Basic Auth, enforced when **both** are set):
+Binding the dashboard to a Tailscale IP is a **non-loopback** bind, and the
+server now **refuses to start** on one unless a password is configured. Set both
+in `.env` before running `serve_tailscale.bat` (HTTP Basic Auth is enforced only
+when **both** are present):
 ```
 DASH_AUTH_USER=you
 DASH_AUTH_PASS=use-a-long-passphrase
 ```
+Miss either one and you get:
+```
+ERROR: Refusing to bind to a non-loopback address without a password.
+```
+This is deliberate. `POST /api/control` can halt the bot and flatten every open
+position, and it is unauthenticated until those two variables are set — so an
+exposed listener without them is a kill switch for anyone who can reach the port.
 
 > Prefer a public link instead? `start_tunnel.bat` (Cloudflare quick tunnel) still
 > works, but **set `DASH_AUTH_USER`/`DASH_AUTH_PASS` first** — a public tunnel has
-> no other protection.
+> no other protection. (Cloudflare reaches the server over loopback, so the bind
+> guard does not fire for you here; nothing else is protecting the tunnel.)
 
 ---
 

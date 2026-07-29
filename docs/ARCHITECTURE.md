@@ -221,6 +221,8 @@ direction-blind and would kill the oversold-flush CALL fade, which is exactly a 
   a browser-set `Sec-Fetch-Site` other than `same-origin`/`none` or a mismatched `Origin` is refused (403),
   and `Host` must be a loopback name (421, closing DNS rebinding). Loopback binding is *not* a CSRF defence —
   it restricts which machines reach the port, not which pages the operator's own browser POSTs from.
+  Binding beyond loopback (`--bind 0.0.0.0`, a LAN address, a Tailscale IP) **exits 2** unless
+  `DASH_AUTH_USER` *and* `DASH_AUTH_PASS` are set, since `/api/control` is otherwise an open kill switch.
 - **`dashboard.html`** — ~2,400-line single-page app (Overview, Strategies, News, Social, Trade History,
   Decision Log, Analytics tabs); polls the JSON files; all rendering escapes via `esc()` (XSS-safe). Clicking a
   strategy card opens a detail modal — what it is, how it's calculated, its exits, current stats, the open
