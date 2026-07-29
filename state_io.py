@@ -53,8 +53,26 @@ import json
 import os
 import sys
 import time
+import uuid
 import contextlib
 from typing import Any, Callable
+
+_LOG = None
+
+
+def _log():
+    """
+    Lazy, memoised logger.
+
+    state_io is the leaf module everything else imports, and get_logger() opens
+    a rotating file handler on first call — merely importing this module should
+    not create a log file.
+    """
+    global _LOG
+    if _LOG is None:
+        from logger import get_logger
+        _LOG = get_logger("state_io")
+    return _LOG
 
 
 # ─── Atomic write / safe read ─────────────────────────────────────────────────
@@ -159,6 +177,15 @@ class LockTimeout(RuntimeError):
     pass
 
 
+def _read_lock_token(lock_path: str) -> str | None:
+    """Current contents of a lock file, or None if it's gone/unreadable."""
+    try:
+        with open(lock_path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
 @contextlib.contextmanager
 def file_lock(path: str, timeout: float = 10.0, stale_after: float = 60.0):
     """
@@ -169,11 +196,41 @@ def file_lock(path: str, timeout: float = 10.0, stale_after: float = 60.0):
       to be from a crashed process and is broken, so a dead process can't
       deadlock the whole bot.
 
+    OWNERSHIP TOKENS
+    ----------------
+    The lock file carries `<pid>:<uuid4>`, unique per acquisition. Without proof
+    of ownership the lock had two races, both of which let two processes believe
+    they held it exclusively:
+
+      * Stale-breaking was TOCTOU. A sees the lock is stale, removes it,
+        recreates it, and proceeds. B — which read getmtime moments earlier —
+        then removes A's *fresh* lock and acquires. So a stale lock is only
+        removed if its contents still match what the staleness check observed;
+        a change means someone else took over, and we go back to waiting.
+
+      * Release was unconditional. Any mutator running longer than
+        `stale_after` gets its own lock broken, and its `finally` then deleted
+        the NEW holder's lock. So release only removes the file if it still
+        contains this acquisition's token.
+
+    RULE: never do network or broker I/O inside an `update_json` mutator (or
+    any file_lock body). A wedged HTTP call blows through `stale_after` and gets
+    the lock broken underneath the holder, which is the exact scenario the
+    conditional release above turns from silent corruption into a warning.
+
+    FUTURE WORK: OS-level locking (`fcntl.flock` / `msvcrt.locking`) is strictly
+    more correct — the kernel releases the lock when the process dies, which
+    removes the stale-lock concept and both of the races above along with it.
+    That is a larger change than this file should absorb in one go.
+
     Usage:
         with file_lock("risk_state.json"):
             ... read-modify-write ...
     """
     lock_path = f"{path}.lock"
+    # Unique per ACQUISITION, not per process: one process may lock the same
+    # file repeatedly, and a recycled pid must not look like a live holder.
+    token = f"{os.getpid()}:{uuid.uuid4().hex}"
     deadline = time.time() + timeout
     acquired = False
 
@@ -182,7 +239,7 @@ def file_lock(path: str, timeout: float = 10.0, stale_after: float = 60.0):
             # O_CREAT | O_EXCL fails if the lock file already exists → that's
             # how we detect contention without a race.
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            os.write(fd, f"{os.getpid()} {time.time()}".encode())
+            os.write(fd, token.encode())
             os.close(fd)
             acquired = True
             break
@@ -194,9 +251,19 @@ def file_lock(path: str, timeout: float = 10.0, stale_after: float = 60.0):
             try:
                 age = time.time() - os.path.getmtime(lock_path)
                 if age > stale_after:
-                    with contextlib.suppress(Exception):
-                        os.remove(lock_path)
-                    continue  # retry immediately
+                    # Read the contents ONLY on the stale path. On Windows an
+                    # open handle blocks the holder's own os.remove, so opening
+                    # this file on every 50ms retry would turn a healthy release
+                    # into a spin that lasts until someone's timeout.
+                    observed = _read_lock_token(lock_path)
+                    # Re-read immediately before removing. If the holder changed
+                    # in the meantime, someone else already broke and re-took
+                    # this lock — removing now would delete THEIR live lock.
+                    if observed is not None and _read_lock_token(lock_path) == observed:
+                        with contextlib.suppress(OSError):
+                            os.remove(lock_path)
+                        continue  # retry immediately
+                    # Ownership moved on. Fall through and keep waiting.
             except FileNotFoundError:
                 continue  # it vanished — retry immediately
             except PermissionError:
@@ -205,12 +272,35 @@ def file_lock(path: str, timeout: float = 10.0, stale_after: float = 60.0):
                 raise LockTimeout(f"Could not acquire lock for {path} within {timeout}s")
             time.sleep(0.05)
 
+    held_since = time.time()
     try:
         yield
     finally:
         if acquired:
-            with contextlib.suppress(Exception):
-                os.remove(lock_path)
+            held = time.time() - held_since
+            if held > stale_after / 2:
+                # Surface long holds while they are still merely slow. Past
+                # stale_after another process breaks this lock, and the first
+                # visible symptom would otherwise be mystery corruption.
+                _log().warning(
+                    "Held lock on %s for %.1fs (stale_after=%.0fs) — another process "
+                    "will break it past that. Is there network I/O inside the mutator?",
+                    path, held, stale_after,
+                )
+            # Only remove OUR lock. If this acquisition was broken as stale, the
+            # file now belongs to a different holder and deleting it would hand
+            # the same lock to a third process.
+            if _read_lock_token(lock_path) == token:
+                # OSError covers both the already-gone case and Windows'
+                # sharing violation when a waiter has the file open; a lock left
+                # behind here is recovered by the next holder's stale-break.
+                with contextlib.suppress(OSError):
+                    os.remove(lock_path)
+            else:
+                _log().warning(
+                    "Lock on %s was taken over by another process while held — "
+                    "not removing it. This run's write may have raced.", path,
+                )
 
 
 def update_json(
@@ -257,8 +347,7 @@ def abort_on_corruption(exc: StateCorruption, component: str) -> None:
     that everything else depends on, so a module-level import would invert the
     dependency; and a notifier that is down must not swallow the exit.
     """
-    from logger import get_logger
-    get_logger("state_io").error("FATAL — corrupt state file in %s: %s", component, exc)
+    _log().error("FATAL — corrupt state file in %s: %s", component, exc)
     print(f"\n[{component}] FATAL: {exc}", file=sys.stderr)
     print(f"[{component}] Refusing to start on unreadable state. Inspect the "
           f".corrupt.* file, fix or remove it, then restart.\n", file=sys.stderr)
