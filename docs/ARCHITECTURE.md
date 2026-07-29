@@ -200,6 +200,10 @@ direction-blind and would kill the oversold-flush CALL fade, which is exactly a 
   a wedged HTTP call outlasts `stale_after` and gets the lock broken underneath the holder. Intended future
   work: OS-level locking (`fcntl.flock` / `msvcrt.locking`), where the kernel releases on process death and
   the stale-lock concept — and both races with it — disappear.
+  **Durability:** the containing directory is fsynced after `os.replace` (atomic is not the same as durable —
+  a power cut can undo a rename the write already returned from). `sweep_stale_temp_files(dir, older_than)`
+  clears `*.tmp` orphans left by a process killed between the write and the replace; `start_all.py` calls it
+  once at launch, the one moment no strategy is mid-write.
 - **`position_book.py`** — shared single-leg book logic (`load/save/add/remove/update`) for Strategies 3–5,
   bound per strategy to its own file. (Consolidated from three identical copies.)
 - **`trade_journal.py`** — appends closed trades (with computed or supplied P&L, `strategy`, `trade_type`)
@@ -492,3 +496,21 @@ CI run eventually goes red for reasons absent from the diff.
   on the first live session (the confirm logic has only been exercised against MOCK + sandbox).
 - **Restart after upgrades:** strategies load their modules at process start, so any code change needs
   `Ctrl+C start_all` → `python start_all.py` to take effect.
+
+---
+
+## 9. Known future work
+
+Deliberately out of scope for the hardening pass, recorded so they are not rediscovered as surprises.
+
+- **Package restructure.** Roughly 70 modules sit at the repository root. They belong under `mawitek/`, split
+  into `strategies/`, `risk/`, `data/`, `execution/` and `dashboard/`. Worth doing, but as its own pull
+  request — folding a thousand-line rename in alongside security diffs buries the security diffs.
+- **Remove `'unsafe-inline'` from the CSP.** `script-src 'self' 'unsafe-inline'` means an injected inline
+  handler would execute, which weakens the claim that the CSP "contains" content injected via an external
+  feed. Removing it needs the 55 `onclick=` attributes in `dashboard.html` rewritten as listeners **and**
+  the inline `<script>` in `backtest_dashboard.html` extracted first — inline handlers require
+  `'unsafe-inline'` just as much as inline `<script>` blocks do.
+- **OS-level file locking.** `state_io.file_lock` is an advisory lock file with ownership tokens and a
+  stale-break. `fcntl.flock` / `msvcrt.locking` are strictly more correct: the kernel releases the lock when
+  the process dies, which removes the stale-lock concept and both of the races the tokens currently guard.

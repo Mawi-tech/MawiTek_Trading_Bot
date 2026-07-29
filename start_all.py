@@ -276,6 +276,18 @@ def main() -> int:
 
     procs: dict[str, subprocess.Popen] = {}
 
+    # Sweep temp files orphaned by a process killed between an atomic write and
+    # its os.replace. They are invisible to every reader and would otherwise
+    # accumulate one per crash forever. Launcher startup is the one moment when
+    # no strategy is mid-write, so the age floor has nothing live to race.
+    try:
+        from state_io import sweep_stale_temp_files
+        swept = sweep_stale_temp_files(str(ROOT))
+        if swept:
+            print(f"[start_all] Swept {len(swept)} orphaned temp file(s) from a prior crash.")
+    except Exception as e:
+        print(f"[start_all] temp-file sweep skipped: {e}")
+
     # Clear any stale heartbeat files from a previous run so the watchdog
     # doesn't false-alarm on beats left over from before this launch.
     try:
