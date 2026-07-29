@@ -228,8 +228,9 @@ direction-blind and would kill the oversold-flush CALL fade, which is exactly a 
   owning strategy** via `tag_positions_with_strategy` — a per-book option-symbol map, since broker positions
   don't carry a strategy), metrics, strategy panel (health / capital / **realized + unrealized P&L per
   strategy** / concentration / regime), greeks, events, alerts, news, social, and the tracked scanner board.
-- **`dashboard_server.py`** — hardened static server: an **allowlist** (`_ALLOWED_EXTS` + `_ALLOWED_JSON`)
-  ensures only dashboard assets and specific JSON files are served (never `.env` or a directory listing);
+- **`dashboard_server.py`** — hardened static server: an **exact-filename allowlist** (`_ALLOWED_FILES` +
+  `_ALLOWED_JSON`) ensures only the named dashboard assets and JSON files are served (never `.env`, a source
+  map, an editor backup, or a directory listing — matching on *extension* would have served all of those);
   optional HTTP Basic Auth; security headers. The mutating routes (`/api/config`, `/api/control`) additionally
   run `_reject_cross_site()` **before reading the body**: `Content-Type: application/json` is mandatory (415),
   a browser-set `Sec-Fetch-Site` other than `same-origin`/`none` or a mismatched `Origin` is refused (403),
