@@ -450,9 +450,16 @@ reconciles with the portfolio `unrealized`. Closed trades are filtered to a stra
 
 ## 7. Testing
 
-`python -m pytest tests/ -q` — **328 tests**, all green, run in `MOCK_MODE` (no network). Coverage spans the
+`python -m pytest tests/ -q` — runs in `MOCK_MODE` (no network). Coverage spans the
 risk gates, signal detectors, scoring, P&L, metrics, greeks, IV, exits, news/social parsing & aggregation,
 the dashboard panels, and the hardened server. Backtests are network research scripts and are not unit-tested.
+
+CI runs the same command on every push and pull request against `main`, plus `workflow_dispatch`, across
+Python 3.10 / 3.11 / 3.12 (`.github/workflows/tests.yml`). The job sets `TRADIER_API_KEY` and
+`TRADIER_ACCOUNT_ID` to the **empty string** and asserts `tradier_client.MOCK_MODE` before running anything:
+mock mode is derived as `(not TRADIER_API_KEY) or (not TRADIER_ACCOUNT_ID)`, so *dummy* credentials would
+switch it OFF and point the suite at Tradier with junk keys. `requirements.txt` is pinned, since an unpinned
+CI run eventually goes red for reasons absent from the diff.
 
 ---
 
