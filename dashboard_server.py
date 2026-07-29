@@ -84,7 +84,22 @@ _AUTH_ENABLED = bool(_AUTH_USER and _AUTH_PASS)
 # server would happily serve GET /.env — leaking every credential — and a GET /
 # would list every filename. We restrict what can be fetched to exactly the
 # dashboard assets and the JSON files the dashboards read. Everything else 404s.
-_ALLOWED_EXTS = {".html", ".css", ".js", ".ico", ".png", ".svg", ".woff", ".woff2", ".map"}
+#
+# The allowlist is by EXACT FILENAME, not by extension. Matching on extension
+# meant any .html/.js/.css/.map that ever landed in the bot directory became
+# web-servable — a scratch copy, an editor backup, a build artefact, a source
+# map. SimpleHTTPRequestHandler.translate_path blocks `..` traversal, so that
+# was never exploitable, but an allowlist should not lean on a second control
+# to be correct. Source maps in particular exist to hand out original source.
+#
+# Adding an asset here is a deliberate act. Check what the file contains first.
+_ALLOWED_FILES = {
+    "dashboard.html",           # the main SPA
+    "backtest_dashboard.html",  # the backtest viewer
+    "dashboard.css",            # extracted from dashboard.html
+    "dashboard.js",             # extracted from dashboard.html
+    "chart.umd.js",             # vendored Chart.js (the CSP blocks the CDN copy)
+}
 # news_feed.json / social_sentiment.json are fetched directly by the News and
 # Social tabs (their own fast polls, so a headline or sentiment update doesn't
 # wait for the next dashboard_state write).
@@ -205,12 +220,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         # dashboard, never a listing — see list_directory below).
         if name == "":
             return True
-        ext = posixpath.splitext(name)[1].lower()
-        if ext in _ALLOWED_EXTS:
-            return True
-        if name in _ALLOWED_JSON:
-            return True
-        return False
+        return name in _ALLOWED_FILES or name in _ALLOWED_JSON
 
     # ── Optional password (HTTP Basic Auth) ─────────────────────────────────
     def _authorized(self) -> bool:
