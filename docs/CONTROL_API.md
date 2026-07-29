@@ -75,7 +75,29 @@ const { ok, state } = await r.json();
   beyond loopback (`python dashboard_server.py --bind 0.0.0.0`). Put it behind a
   tunnel/VPN (e.g. Tailscale) rather than the open internet.
 - `flatten` additionally requires `"confirm": "FLATTEN"` so it can't fire by
-  accident.
+  accident. This is a typo guard, not a security control — the token is
+  published right here.
+
+## Cross-site protection
+
+Every POST is screened before its body is read. A caller that fails any check
+never reaches `bot_control`:
+
+| Requirement | Failure |
+|---|---|
+| `Content-Type: application/json` (a `; charset=…` parameter is fine) | `415` |
+| `Sec-Fetch-Site`, if the client sends it, is `same-origin` or `none` | `403` |
+| `Origin`, if present, has the same host as `Host` | `403` |
+| `Host` is `localhost`, `127.0.0.1`, `::1`, or `[::1]` (port ignored) | `421` |
+
+The content-type rule is what actually stops CSRF: `application/json` is not a
+CORS-safelisted content type, so a cross-origin `fetch()` carrying it must pass
+a preflight, and this server answers none. The `Host` rule stops DNS rebinding,
+where an attacker-controlled name re-resolves to `127.0.0.1` and thereby gets a
+same-origin browser context.
+
+Command-line clients (curl, your Discord bot) send no `Sec-Fetch-Site` or
+`Origin`, so they are unaffected — set the content type and use a loopback host.
 
 ## CLI alternative
 

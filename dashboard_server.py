@@ -103,6 +103,45 @@ CONFIG_ENDPOINT = "/api/config"
 CONTROL_ENDPOINT = "/api/control"
 MAX_CONFIG_BODY = 64 * 1024   # 64 KB
 
+# ─── Cross-site request defence (POST endpoints) ───────────────────────────────
+# Loopback binding restricts the NETWORK, not the operator's own browser. Any
+# page the operator visits can issue a cross-origin POST that the browser will
+# happily deliver to 127.0.0.1 — the attacker can't read our reply, but for
+# /api/control they don't need to: the positions are already flattened. The
+# confirm=FLATTEN token is documented in the README, so it is not a secret.
+#
+# Three checks turn that into a browser-enforced impossibility:
+#   1. application/json is NOT a CORS-safelisted request content type, so a
+#      cross-origin fetch carrying it must first pass a preflight — which this
+#      server never answers. Simple-request smuggling via text/plain dies here.
+#   2. Sec-Fetch-Site / Origin are set by the browser and cannot be forged from
+#      page JavaScript, so they positively identify a cross-site caller.
+#   3. Pinning Host to loopback names closes DNS rebinding, where an attacker
+#      domain re-resolves to 127.0.0.1 and thereby earns a same-origin context.
+_JSON_CONTENT_TYPE = "application/json"
+# Host values that can only mean "this machine". Anything else reaching us is
+# either a rebinding attack or a misconfigured proxy — neither should mutate state.
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+# Sec-Fetch-Site values a legitimate dashboard request can carry. "none" is a
+# direct navigation (address bar); "same-origin" is our own page's fetch().
+_SAFE_FETCH_SITES = {"same-origin", "none"}
+
+
+def _host_only(value: str) -> str:
+    """
+    Strip the port from a Host-header-style authority, lowercased.
+
+    IPv6 literals are bracketed (`[::1]:8000`), so a naive rsplit(":") would
+    mangle them into `[` — split after the closing bracket instead.
+    """
+    value = (value or "").strip().lower()
+    if value.startswith("["):
+        end = value.find("]")
+        if end != -1:
+            return value[: end + 1]
+        return value
+    return value.rsplit(":", 1)[0] if ":" in value else value
+
 
 # ─── Custom request handler ────────────────────────────────────────────────────
 
@@ -204,15 +243,66 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         self.send_error(404, "Not Found")
         return None
 
+    # ── Cross-site request rejection (shared by every POST endpoint) ─────────
+    def _reject_cross_site(self) -> bool:
+        """
+        Reject a POST a browser could have been tricked into sending.
+
+        Returns True if the request was rejected AND a response has already
+        been written — the caller must then return immediately. Both mutating
+        endpoints run this single implementation so the two can never drift
+        apart as one of them gains a new action.
+
+        See the _JSON_CONTENT_TYPE comment block for why each check is here.
+        """
+        # 1. Content type. Parsed off any `; charset=utf-8` parameter and
+        #    compared case-insensitively, because browsers and proxies both
+        #    normalise this header inconsistently.
+        ctype = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if ctype != _JSON_CONTENT_TYPE:
+            self._send_json(415, {"ok": False,
+                                  "error": f"expected Content-Type: {_JSON_CONTENT_TYPE}"})
+            return True
+
+        # 2. Browser-set provenance headers. Absent means a non-browser client
+        #    (curl, the Discord control bot) — those were never the CSRF threat.
+        fetch_site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
+        if fetch_site and fetch_site not in _SAFE_FETCH_SITES:
+            self._send_json(403, {"ok": False, "error": "cross-site request rejected"})
+            return True
+
+        host = _host_only(self.headers.get("Host", ""))
+        origin = self.headers.get("Origin", "").strip()
+        if origin:
+            # urlsplit("null").hostname is None — a null Origin (sandboxed
+            # iframe) therefore fails this compare, which is the correct answer.
+            origin_host = (urlsplit(origin).hostname or "").lower()
+            if origin_host != host:
+                self._send_json(403, {"ok": False, "error": "origin does not match host"})
+                return True
+
+        # 3. DNS rebinding. 421 Misdirected Request is the precise status: the
+        #    request arrived at a server that does not serve that authority.
+        if host not in _LOOPBACK_HOSTS:
+            self._send_json(421, {"ok": False, "error": "unrecognised Host header"})
+            return True
+
+        return False
+
     # ── Config save endpoint (POST /api/config) ─────────────────────────────
     def do_POST(self) -> None:
         """
-        Persist dashboard-edited risk config. The only mutating route.
+        Persist dashboard-edited risk config, or run a runtime control command.
+        The only mutating routes.
 
         Same auth gate as GET (so an exposed dashboard with DASH_AUTH set is
         write-protected too), a hard body-size cap, strict JSON parsing, and the
         actual clamping/validation delegated to user_config.save_user_config.
-        Loopback-only binding remains the first line of defence against CSRF.
+
+        CSRF is stopped by _reject_cross_site(), which runs before a single byte
+        of the body is read. Loopback binding is NOT a CSRF defence — it limits
+        which machines can reach the port, not which pages the operator's own
+        browser will POST from.
         """
         if not self._authorized():
             self._send_auth_challenge()
@@ -221,6 +311,9 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path not in (CONFIG_ENDPOINT, CONTROL_ENDPOINT):
             self.send_error(404, "Not Found")
+            return
+
+        if self._reject_cross_site():
             return
 
         try:

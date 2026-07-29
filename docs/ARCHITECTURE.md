@@ -216,7 +216,11 @@ direction-blind and would kill the oversold-flush CALL fade, which is exactly a 
   strategy** / concentration / regime), greeks, events, alerts, news, social, and the tracked scanner board.
 - **`dashboard_server.py`** — hardened static server: an **allowlist** (`_ALLOWED_EXTS` + `_ALLOWED_JSON`)
   ensures only dashboard assets and specific JSON files are served (never `.env` or a directory listing);
-  optional HTTP Basic Auth; security headers.
+  optional HTTP Basic Auth; security headers. The mutating routes (`/api/config`, `/api/control`) additionally
+  run `_reject_cross_site()` **before reading the body**: `Content-Type: application/json` is mandatory (415),
+  a browser-set `Sec-Fetch-Site` other than `same-origin`/`none` or a mismatched `Origin` is refused (403),
+  and `Host` must be a loopback name (421, closing DNS rebinding). Loopback binding is *not* a CSRF defence —
+  it restricts which machines reach the port, not which pages the operator's own browser POSTs from.
 - **`dashboard.html`** — ~2,400-line single-page app (Overview, Strategies, News, Social, Trade History,
   Decision Log, Analytics tabs); polls the JSON files; all rendering escapes via `esc()` (XSS-safe). Clicking a
   strategy card opens a detail modal — what it is, how it's calculated, its exits, current stats, the open
