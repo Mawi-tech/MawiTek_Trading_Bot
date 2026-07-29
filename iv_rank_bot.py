@@ -52,7 +52,8 @@ from risk_manager import (
     max_trade_loss_dollars,
 )
 from trade_journal import record_closed_trade
-from state_io import file_lock, atomic_write_json, read_json
+from state_io import (file_lock, atomic_write_json, read_json,
+                      StateCorruption, abort_on_corruption)
 from utils import now_est, today_est, is_market_session_open
 from heartbeat import beat
 
@@ -1534,6 +1535,10 @@ def run():
         for r in recover_pending_orders():
             if r.ok and r.filled_qty > 0:
                 print(f"[IVRank] Recovered fill from prior session: {r.tag} — {r.reason}")
+    except StateCorruption as e:
+        # Must precede the catch-all: an unreadable pending ledger means we
+        # cannot know what is in flight at the broker.
+        abort_on_corruption(e, "iv_rank_bot")
     except Exception as e:
         print(f"[IVRank] Pending-order recovery failed (non-fatal): {e}")
 

@@ -38,6 +38,7 @@ from option_selector import select_option
 from risk_manager import pre_trade_check, size_contracts, record_trade, reconcile_from_broker
 from position_manager import monitor_positions, record_entry
 from order_manager import place_and_confirm, recover_pending_orders
+from state_io import StateCorruption, abort_on_corruption
 from dashboard_state import write_dashboard_state
 from heartbeat import beat
 from utils import now_est, today_est, is_market_session_open
@@ -53,7 +54,7 @@ from equity_tracker import snapshot_equity
 SCAN_INTERVAL_SECONDS  = 300    # Re-scan every 5 minutes while the market is open
 CLOSED_SCAN_INTERVAL_SECONDS = 1800  # After-hours: scan every 30 min (daily data is static)
 SCAN_UNIVERSE_LIMIT    = 200    # Names scanned per cycle (rotates through the full market)
-MIN_SETUP_SCORE        = 50     # Only trade setups scoring 50+/100
+MIN_SETUP_SCORE        = 65     # Only trade high-conviction setups (was 50; 50-59 bucket bled -$541/trade)
 MAX_TRADES_PER_SCAN    = 2      # Max new positions per scan cycle
 USE_LIMIT_ORDERS       = True   # Limit orders for better fills
 LIMIT_ORDER_BUFFER     = 0.05   # Pay up to 5% above mid for fills
@@ -299,6 +300,11 @@ def run():
         for r in recovered:
             if r.ok and r.filled_qty > 0:
                 print(f"[Executor] Recovered fill from prior session: {r.tag} — {r.reason}")
+    except StateCorruption as e:
+        # Must precede the catch-all: an unreadable pending ledger means we
+        # cannot know what is in flight at the broker, and "non-fatal" is the
+        # wrong answer to that.
+        abort_on_corruption(e, "executor")
     except Exception as e:
         print(f"[Executor] Pending-order recovery failed (non-fatal): {e}")
 

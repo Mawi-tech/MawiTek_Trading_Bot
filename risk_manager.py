@@ -36,7 +36,7 @@ import json
 import os
 from tradier_client import get_account_balance, get_open_positions
 from utils import now_est, today_est
-from state_io import atomic_write_json, file_lock
+from state_io import atomic_write_json, file_lock, read_json, StateCorruption
 
 
 # ─── Risk Config ───────────────────────────────────────────────────────────────
@@ -266,6 +266,14 @@ HALT_EVENTS_FILE = "halt_events.json"   # NEW: persistent log of every halt even
 # ─── State Management ──────────────────────────────────────────────────────────
 
 def load_state() -> dict:
+    """Load today's risk state, or a fresh one if the file is missing/stale.
+
+    Reads strictly: an unparseable risk_state.json raises StateCorruption
+    rather than silently degrading to the default. The default has halted=False
+    and realized_pnl=0.0, so swallowing a parse error here is precisely how a
+    live daily-loss halt disappears and the bot resumes trading into a losing
+    session. A stopped bot is recoverable; that is not.
+    """
     # "Today" must be the US/Eastern trading day, not the host's local day.
     # Otherwise a server in UTC rolls over hours before the NYSE close and
     # zeros out an active halt or P&L.
@@ -276,17 +284,13 @@ def load_state() -> dict:
         "trades_today": 0,
         "halted": False,
     }
-    if not os.path.exists(STATE_FILE):
+    state = read_json(STATE_FILE, default, strict=True)
+    if not isinstance(state, dict):
+        raise StateCorruption(f"{STATE_FILE} is valid JSON but not an object: {type(state).__name__}")
+    # Reset if it's a new trading day
+    if state.get("date") != today:
         return default
-    try:
-        with open(STATE_FILE, "r") as f:
-            state = json.load(f)
-        # Reset if it's a new trading day
-        if state.get("date") != today:
-            return default
-        return state
-    except Exception:
-        return default
+    return state
 
 
 def save_state(state: dict):

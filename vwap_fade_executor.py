@@ -33,6 +33,7 @@ from hft_executor import select_intraday_option, _marketable_limit, USE_LIMIT
 from universe import scan_csv
 from tradier_client import get_options_chain, get_quote, get_open_positions, MOCK_MODE
 from order_manager import place_and_confirm, recover_pending_orders
+from state_io import StateCorruption, abort_on_corruption
 from risk_manager import pre_trade_check, size_contracts, record_trade, reconcile_from_broker
 from logger import get_logger, log_trade
 from trade_journal import record_closed_trade
@@ -450,6 +451,10 @@ def run():
         for r in recover_pending_orders():
             if r.ok and r.filled_qty > 0:
                 log.info("Recovered fill from prior session: %s — %s", r.tag, r.reason)
+    except StateCorruption as e:
+        # Must precede the catch-all: an unreadable pending ledger means we
+        # cannot know what is in flight at the broker.
+        abort_on_corruption(e, "vwap_fade_executor")
     except Exception as e:
         log.warning("Pending-order recovery failed (non-fatal): %s", e)
     try:

@@ -183,9 +183,15 @@ direction-blind and would kill the oversold-flush CALL fade, which is exactly a 
 - **`iv_provider.py`** — per-ticker IV context: ATM IV, IV/HV ratio, IV rank/percentile, regime (§5.5).
 
 ### 4.6 State, journaling & infra
-- **`state_io.py`** — `atomic_write_json` (temp-file + `os.replace`), `read_json` (safe default), `file_lock`
+- **`state_io.py`** — `atomic_write_json` (temp-file + `os.replace`), `read_json`, `file_lock`
   (cross-process advisory lock with stale-break), `update_json` (locked read-modify-write). Refuses to write
   `Infinity`/`NaN` (invalid JSON that breaks the dashboard parser).
+  **Fail-closed reads:** a missing file yields `default` (legitimate first run), but a file that exists and
+  won't parse is renamed to `<path>.corrupt.<unix_ts>` and — under `strict=True` — raises `StateCorruption`
+  instead of silently degrading to `default`. `risk_manager.load_state` and `order_manager._load_pending`
+  read strictly, because `default` for those means *halt flag gone, P&L zeroed* and *nothing in flight*
+  respectively. Each strategy's startup catches `StateCorruption` **before** its non-fatal catch-all and calls
+  `state_io.abort_on_corruption`, which logs at ERROR, fires an `event_notifier` alert, and exits 1.
 - **`position_book.py`** — shared single-leg book logic (`load/save/add/remove/update`) for Strategies 3–5,
   bound per strategy to its own file. (Consolidated from three identical copies.)
 - **`trade_journal.py`** — appends closed trades (with computed or supplied P&L, `strategy`, `trade_type`)
