@@ -1,8 +1,12 @@
-yfinance
-pandas
-ta
-python-dotenv
-requests
+# Pinned. An unpinned CI run eventually breaks for reasons unrelated to this
+# code — a pandas or yfinance release changes behaviour and a green suite goes
+# red overnight with nothing in the diff to explain it. Bump these deliberately.
+# Versions below are the ones the suite is verified against.
+yfinance==0.2.61
+pandas==2.2.3
+ta==0.11.0
+python-dotenv==1.2.2
+requests==2.32.3
 
 # ── Dev / testing ──────────────────────────────────────────────────────────
-pytest
+pytest==8.4.2
