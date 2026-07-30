@@ -1,0 +1,57 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    env:
+      # The suite must never reach a real account. MOCK_MODE is NOT an env var —
+      # tradier_client derives it as `(not TRADIER_API_KEY) or (not
+      # TRADIER_ACCOUNT_ID)`, so setting dummy credentials here would switch
+      # mock mode OFF and point the suite at Tradier with junk keys. Empty is
+      # what turns it on. They are set explicitly, rather than just left unset,
+      # so nobody "fixes" this later by filling them in.
+      TRADIER_API_KEY: ""
+      TRADIER_ACCOUNT_ID: ""
+      # Belt and braces: even if credentials ever did leak into this job, the
+      # sandbox host is the only one it could talk to.
+      TRADIER_SANDBOX: "true"
+
+    steps:
+      # SHA-pinned, not tag-pinned: a tag is mutable, so `@v7` silently
+      # follows whatever that tag is repointed at. This repo is public and
+      # accepts fork PRs, so the action content is a supply-chain input.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Confirm mock mode is active
+        # Fail here rather than discovering mid-suite that a test placed an
+        # order. This assertion is the reason the env block above is empty.
+        run: python -c "import tradier_client; assert tradier_client.MOCK_MODE, 'MOCK_MODE is off — the suite would hit a real account'"
+
+      - name: Run tests
+        run: python -m pytest tests/ -q

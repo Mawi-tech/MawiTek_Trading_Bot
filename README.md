@@ -3,7 +3,7 @@
 Multi-strategy options trading bot with a live dashboard, risk management, and broker integration via Tradier.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-328%20passing-brightgreen)
+[![Tests](https://github.com/Mawi-tech/MawiTek_Trading_Bot/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Mawi-tech/MawiTek_Trading_Bot/actions/workflows/tests.yml)
 ![Broker](https://img.shields.io/badge/broker-Tradier-0a7cff)
 ![License](https://img.shields.io/badge/license-All%20Rights%20Reserved-red)
 
@@ -16,7 +16,7 @@ Multi-strategy options trading bot with a live dashboard, risk management, and b
 - **Production-grade safety** — real fill confirmation (no assumed mids), crash recovery via a pending-order ledger, atomic + cross-process-locked state files, an emergency kill switch, and a watchdog that detects dead *or* hung strategy processes.
 - **Layered risk engine** — per-trade and daily-loss limits, per-strategy capital allocation, day/swing position budgets, a 9-cluster correlation cap, portfolio vega cap, IV-aware sizing, and an automatic bear-market throttle.
 - **Live single-page dashboard** — equity, P&L, positions, scanner setups, multi-source news, retail social sentiment, a full decision audit log, and analytics (Sharpe, drawdown, profit factor, expectancy).
-- **328 passing tests** that run fully offline in `MOCK_MODE` (no network, no broker calls).
+- **Tests run fully offline in `MOCK_MODE`** (no network, no broker calls), on every push and pull request across Python 3.10, 3.11 and 3.12 — the badge above is the live result, not a picture of one.
 
 **Stack:** Python · Tradier API · pandas/numpy · yfinance · vanilla-JS SPA dashboard · pytest
 
