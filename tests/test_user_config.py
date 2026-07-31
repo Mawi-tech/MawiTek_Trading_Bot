@@ -148,6 +148,15 @@ def _stub_checks(monkeypatch, equity, positions=0):
     monkeypatch.setattr(rm, "_strategy_budget", lambda strat, eq, b: (b, None))
     monkeypatch.setattr(rm, "count_positions_by_type", lambda tt: positions)
     monkeypatch.setattr(mr, "is_bear_market", lambda: False)
+    # Isolate IV-aware sizing. pre_trade_check multiplies the budget by
+    # _iv_size_mult(), which reads iv_provider.iv_context() -> the machine-local
+    # iv_cache.json in the cwd. On a developer box that has run the bot, a
+    # cached IV-rich reading applies an extra x0.4 and these budget assertions
+    # fail; on a clean checkout or in CI the cache is empty and they pass. The
+    # cache is also keyed per ET day, so the failure comes and goes with the
+    # date. Pin it to 1.0 so these tests measure the throttle they are named
+    # for, and nothing else. IV sizing has its own coverage in test_iv_sizing.py.
+    monkeypatch.setattr(rm, "_iv_size_mult", lambda strategy, ticker: 1.0)
 
 
 def test_pre_trade_check_rejects_disabled_strategy(monkeypatch):
