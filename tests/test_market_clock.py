@@ -47,8 +47,13 @@ def _wire_clock(monkeypatch, state, counter=None):
 
 # ── get_market_clock / market_open_now ───────────────────────────────────────
 
-def test_mock_mode_returns_unknown():
-    assert tc.get_market_clock() == {}          # MOCK_MODE default in tests
+def test_mock_mode_returns_unknown(monkeypatch):
+    # Assert the MOCK_MODE branch explicitly instead of relying on the
+    # ambient default. conftest.py now pins MOCK_MODE on for the whole
+    # suite, but a test named for this branch should force it, so it stays
+    # meaningful if that ever changes.
+    monkeypatch.setattr(tc, "MOCK_MODE", True)
+    assert tc.get_market_clock() == {}
     assert tc.market_open_now() is None
 
 
