@@ -71,9 +71,11 @@ const { ok, state } = await r.json();
   same machine can reach it. If your Discord bot runs on the same box, nothing
   more is needed.
 - **Remote / exposed:** set `DASH_AUTH_USER` and `DASH_AUTH_PASS` in `.env` to
-  require HTTP Basic auth on every request (GET and POST), and only then bind
-  beyond loopback (`python dashboard_server.py --bind 0.0.0.0`). Put it behind a
-  tunnel/VPN (e.g. Tailscale) rather than the open internet.
+  require HTTP Basic auth on every request (GET and POST). This is **mandatory**
+  beyond loopback — `python dashboard_server.py --bind 0.0.0.0` exits with status
+  2 unless both are set, because an unauthenticated `/api/control` on a reachable
+  interface is a kill switch. Put it behind a tunnel/VPN (e.g. Tailscale) rather
+  than the open internet.
 - `flatten` additionally requires `"confirm": "FLATTEN"` so it can't fire by
   accident. This is a typo guard, not a security control — the token is
   published right here.
