@@ -122,7 +122,7 @@ children.push(table(
 children.push(P([bold("Data flow: "), run("scanners read market data (Tradier) → produce scored setups → the risk manager gates each candidate → order_manager places & confirms the real fill → the trade is recorded in that strategy's position book and the shared journal → dashboard_state.py assembles dashboard_state.json → dashboard.html polls and renders it.")]));
 
 // 3. Strategies
-children.push(H1("3. The Five Strategies"));
+children.push(H1("3. The Six Strategies"));
 const strat = [
   ["Strategy 1 — Catalyst long calls", "executor.py, options_scanner.py",
    "Buys ~ATM/OTM long calls 7–30 DTE before an earnings/news catalyst. Exits via position_manager (TP/SL/DTE). Honestly modeled as negative-EV once IV crush is priced — it fights vega into the print; kept small. The real premium edge is Strategy 2."],
@@ -181,7 +181,7 @@ const groups = [
     ["iv_provider.py", "Per-ticker IV context: ATM IV, IV/HV, IV rank/percentile, regime."],
   ]],
   ["4.6 State, journaling & infra", [
-    ["state_io.py", "atomic_write_json, read_json, file_lock, update_json; refuses Infinity/NaN."],
+    ["state_io.py", "atomic_write_json, read_json, file_lock, update_json; refuses Infinity/NaN. FAIL-CLOSED READS: a file that exists but will not parse is quarantined to <path>.corrupt.<ts> and, under strict=True, raises StateCorruption instead of degrading to the default — risk_state.json and pending_orders.json read strictly, because their default means halt-flag-gone and nothing-in-flight. Each strategy startup catches it before its non-fatal catch-all and calls abort_on_corruption (ERROR log + event_notifier alert + exit 1). LOCK OWNERSHIP: the lock file carries a <pid>:<uuid4> token, unique per acquisition; release removes it only if the token still matches, and a stale lock is broken only if its contents are unchanged between the check and the removal — closing two races that let two processes hold one lock. Rule: never do network or broker I/O inside an update_json mutator. DURABILITY: the containing directory is fsynced after os.replace, and sweep_stale_temp_files() clears *.tmp orphans at launch."],
     ["position_book.py", "Shared single-leg book I/O for Strategies 3–5 (consolidated from 3 copies)."],
     ["trade_journal.py", "Appends closed trades (P&L, strategy, trade_type) to closed_trades.json."],
     ["decision_log.py", "Append-only per-decision audit (traded/rejected/exited), deduped."],
@@ -192,7 +192,7 @@ const groups = [
     ["analytics_metrics.py", "Sharpe, max drawdown, total return, win rate, profit factor, expectancy, breakdowns."],
     ["setup_tracker.py", "Forward returns + win/loss finalization → scanner hit-rate by score bucket."],
     ["dashboard_state.py", "Assembles dashboard_state.json (account, positions, metrics, panels, greeks, news, social)."],
-    ["dashboard_server.py", "Hardened static server: allowlist, optional Basic Auth, security headers."],
+    ["dashboard_server.py", "Hardened static server. EXACT-FILENAME allowlist (_ALLOWED_FILES + _ALLOWED_JSON) — matching on extension would have served source maps, editor backups and scratch copies. Never .env, never a directory listing. Optional HTTP Basic Auth, compared as UTF-8 bytes with both fields checked unconditionally (a non-ASCII password used to 500, and `and` made a valid username timing-distinguishable). CSRF: the mutating routes run _reject_cross_site() before reading any body — application/json required (415), cross-site Sec-Fetch-Site or mismatched Origin refused (403), Host pinned to loopback (421, closing DNS rebinding). Loopback binding is NOT a CSRF defence. Binding beyond loopback exits 2 unless DASH_AUTH_USER and DASH_AUTH_PASS are both set, since /api/control can halt and flatten. Security headers incl. X-XSS-Protection: 0 (the legacy auditor is deprecated and has bypasses; CSP is the control)."],
     ["dashboard.html", "~2,400-line SPA (Overview, Strategies, News, Social, History, Decisions, Analytics); XSS-safe. Clickable strategy cards open a detail modal (description, calc, exits, stats, open positions, recent trades)."],
   ]],
   ["4.8 Safety & ops", [
@@ -341,7 +341,8 @@ children.push(table(["File", "Writer", "Contents"], [
 
 // 7. Testing & 8. Safety
 children.push(H1("7. Testing"));
-children.push(P("python -m pytest tests/ -q — 328 tests, all green, run in MOCK_MODE (no network). Coverage spans the risk gates, signal detectors, scoring, P&L (incl. the account P&L summary + per-strategy attribution), metrics, greeks, IV, exits, news/social parsing & aggregation, the dashboard panels, and the hardened server. Backtests are network research scripts and are not unit-tested."));
+children.push(P("python -m pytest tests/ -q — runs in MOCK_MODE (no network). Coverage spans the risk gates, signal detectors, scoring, P&L (incl. the account P&L summary + per-strategy attribution), metrics, greeks, IV, exits, news/social parsing & aggregation, the dashboard panels, and the hardened server. Backtests are network research scripts and are not unit-tested."));
+children.push(P("CI runs the same command on every push and pull request against main, plus workflow_dispatch, across Python 3.10 / 3.11 / 3.12 (.github/workflows/tests.yml), with SHA-pinned actions. The job sets TRADIER_API_KEY and TRADIER_ACCOUNT_ID to the EMPTY string and asserts tradier_client.MOCK_MODE before running anything: mock mode is derived as (not TRADIER_API_KEY) or (not TRADIER_ACCOUNT_ID), so dummy credentials would switch it OFF and point the suite at Tradier with junk keys. tests/conftest.py applies the same pinning locally, so a developer machine with a real .env no longer runs the suite with live credentials. requirements.txt is pinned."));
 
 children.push(H1("8. Safety & Operations"));
 [
@@ -349,6 +350,15 @@ children.push(H1("8. Safety & Operations"));
   [bold("Remote dashboard: "), run("Tailscale HTTPS serve — see REMOTE_ACCESS.md.")],
   [bold("Going live (not yet ready): "), run("rotate the API key, set TRADIER_SANDBOX=false, and validate fills/partials on the first live session (confirm logic only exercised against MOCK + sandbox).")],
   [bold("Restart after upgrades: "), run("strategies load modules at process start, so code changes need Ctrl+C start_all → python start_all.py.")],
+].forEach((r) => children.push(bullet(r)));
+
+// 9. Known future work
+children.push(H1("9. Known Future Work"));
+children.push(P("Deliberately out of scope for the hardening pass, recorded so they are not rediscovered as surprises."));
+[
+  [bold("Package restructure: "), run("~70 modules sit at the repository root. They belong under mawitek/ split into strategies/, risk/, data/, execution/ and dashboard/. Worth doing, but as its own pull request — folding a thousand-line rename in alongside security diffs buries the security diffs.")],
+  [bold("Remove 'unsafe-inline' from the CSP: "), run("script-src 'self' 'unsafe-inline' means an injected inline handler would execute, which weakens the claim that the CSP contains content injected via an external feed. Removing it needs the 55 onclick= attributes in dashboard.html rewritten as listeners AND the inline <script> in backtest_dashboard.html extracted first — inline handlers require 'unsafe-inline' just as much as inline script blocks do.")],
+  [bold("OS-level file locking: "), run("state_io.file_lock is an advisory lock file with ownership tokens and a stale-break. fcntl.flock / msvcrt.locking are strictly more correct: the kernel releases the lock when the process dies, which removes the stale-lock concept and both of the races the tokens currently guard.")],
 ].forEach((r) => children.push(bullet(r)));
 
 // ---- assemble --------------------------------------------------------------
