@@ -183,9 +183,27 @@ direction-blind and would kill the oversold-flush CALL fade, which is exactly a 
 - **`iv_provider.py`** — per-ticker IV context: ATM IV, IV/HV ratio, IV rank/percentile, regime (§5.5).
 
 ### 4.6 State, journaling & infra
-- **`state_io.py`** — `atomic_write_json` (temp-file + `os.replace`), `read_json` (safe default), `file_lock`
+- **`state_io.py`** — `atomic_write_json` (temp-file + `os.replace`), `read_json`, `file_lock`
   (cross-process advisory lock with stale-break), `update_json` (locked read-modify-write). Refuses to write
   `Infinity`/`NaN` (invalid JSON that breaks the dashboard parser).
+  **Fail-closed reads:** a missing file yields `default` (legitimate first run), but a file that exists and
+  won't parse is renamed to `<path>.corrupt.<unix_ts>` and — under `strict=True` — raises `StateCorruption`
+  instead of silently degrading to `default`. `risk_manager.load_state` and `order_manager._load_pending`
+  read strictly, because `default` for those means *halt flag gone, P&L zeroed* and *nothing in flight*
+  respectively. Each strategy's startup catches `StateCorruption` **before** its non-fatal catch-all and calls
+  `state_io.abort_on_corruption`, which logs at ERROR, fires an `event_notifier` alert, and exits 1.
+  **Lock ownership:** the lock file carries a `<pid>:<uuid4>` token, unique per *acquisition*. Release removes
+  the file only if it still holds that token (so a holder whose lock was broken as stale can't delete the new
+  owner's), and a stale lock is removed only if its contents are unchanged between the staleness check and the
+  removal (closing the TOCTOU where two processes both break and both acquire). A hold longer than
+  `stale_after / 2` logs a warning. **Rule: never do network or broker I/O inside an `update_json` mutator** —
+  a wedged HTTP call outlasts `stale_after` and gets the lock broken underneath the holder. Intended future
+  work: OS-level locking (`fcntl.flock` / `msvcrt.locking`), where the kernel releases on process death and
+  the stale-lock concept — and both races with it — disappear.
+  **Durability:** the containing directory is fsynced after `os.replace` (atomic is not the same as durable —
+  a power cut can undo a rename the write already returned from). `sweep_stale_temp_files(dir, older_than)`
+  clears `*.tmp` orphans left by a process killed between the write and the replace; `start_all.py` calls it
+  once at launch, the one moment no strategy is mid-write.
 - **`position_book.py`** — shared single-leg book logic (`load/save/add/remove/update`) for Strategies 3–5,
   bound per strategy to its own file. (Consolidated from three identical copies.)
 - **`trade_journal.py`** — appends closed trades (with computed or supplied P&L, `strategy`, `trade_type`)
@@ -214,13 +232,16 @@ direction-blind and would kill the oversold-flush CALL fade, which is exactly a 
   owning strategy** via `tag_positions_with_strategy` — a per-book option-symbol map, since broker positions
   don't carry a strategy), metrics, strategy panel (health / capital / **realized + unrealized P&L per
   strategy** / concentration / regime), greeks, events, alerts, news, social, and the tracked scanner board.
-- **`dashboard_server.py`** — hardened static server: an **allowlist** (`_ALLOWED_EXTS` + `_ALLOWED_JSON`)
-  ensures only dashboard assets and specific JSON files are served (never `.env` or a directory listing);
+- **`dashboard_server.py`** — hardened static server: an **exact-filename allowlist** (`_ALLOWED_FILES` +
+  `_ALLOWED_JSON`) ensures only the named dashboard assets and JSON files are served (never `.env`, a source
+  map, an editor backup, or a directory listing — matching on *extension* would have served all of those);
   optional HTTP Basic Auth; security headers. The mutating routes (`/api/config`, `/api/control`) additionally
   run `_reject_cross_site()` **before reading the body**: `Content-Type: application/json` is mandatory (415),
   a browser-set `Sec-Fetch-Site` other than `same-origin`/`none` or a mismatched `Origin` is refused (403),
   and `Host` must be a loopback name (421, closing DNS rebinding). Loopback binding is *not* a CSRF defence —
   it restricts which machines reach the port, not which pages the operator's own browser POSTs from.
+  Binding beyond loopback (`--bind 0.0.0.0`, a LAN address, a Tailscale IP) **exits 2** unless
+  `DASH_AUTH_USER` *and* `DASH_AUTH_PASS` are set, since `/api/control` is otherwise an open kill switch.
 - **`dashboard.html`** — ~2,400-line single-page app (Overview, Strategies, News, Social, Trade History,
   Decision Log, Analytics tabs); polls the JSON files; all rendering escapes via `esc()` (XSS-safe). Clicking a
   strategy card opens a detail modal — what it is, how it's calculated, its exits, current stats, the open
@@ -475,3 +496,21 @@ CI run eventually goes red for reasons absent from the diff.
   on the first live session (the confirm logic has only been exercised against MOCK + sandbox).
 - **Restart after upgrades:** strategies load their modules at process start, so any code change needs
   `Ctrl+C start_all` → `python start_all.py` to take effect.
+
+---
+
+## 9. Known future work
+
+Deliberately out of scope for the hardening pass, recorded so they are not rediscovered as surprises.
+
+- **Package restructure.** Roughly 70 modules sit at the repository root. They belong under `mawitek/`, split
+  into `strategies/`, `risk/`, `data/`, `execution/` and `dashboard/`. Worth doing, but as its own pull
+  request — folding a thousand-line rename in alongside security diffs buries the security diffs.
+- **Remove `'unsafe-inline'` from the CSP.** `script-src 'self' 'unsafe-inline'` means an injected inline
+  handler would execute, which weakens the claim that the CSP "contains" content injected via an external
+  feed. Removing it needs the 55 `onclick=` attributes in `dashboard.html` rewritten as listeners **and**
+  the inline `<script>` in `backtest_dashboard.html` extracted first — inline handlers require
+  `'unsafe-inline'` just as much as inline `<script>` blocks do.
+- **OS-level file locking.** `state_io.file_lock` is an advisory lock file with ownership tokens and a
+  stale-break. `fcntl.flock` / `msvcrt.locking` are strictly more correct: the kernel releases the lock when
+  the process dies, which removes the stale-lock concept and both of the races the tokens currently guard.

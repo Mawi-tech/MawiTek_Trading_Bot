@@ -31,8 +31,13 @@ SAFETY
 ------
 Binds to 127.0.0.1 (loopback) by default — only your local machine can reach it.
 The dashboards never expose credentials, but there's still no reason to make
-your bot state accessible to the LAN. Use --bind 0.0.0.0 explicitly if you
-really do want LAN access (e.g. viewing the dashboard from your phone).
+your bot state accessible to the LAN.
+
+Binding beyond loopback (--bind 0.0.0.0, a LAN address, or a Tailscale IP)
+REQUIRES a password: set both DASH_AUTH_USER and DASH_AUTH_PASS, or the server
+refuses to start. /api/control can halt the bot and flatten every position, so
+an unauthenticated listener on an untrusted network hands that to anyone who
+can reach the port.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hmac
+import ipaddress
 import json
 import os
 import posixpath
@@ -78,7 +84,22 @@ _AUTH_ENABLED = bool(_AUTH_USER and _AUTH_PASS)
 # server would happily serve GET /.env — leaking every credential — and a GET /
 # would list every filename. We restrict what can be fetched to exactly the
 # dashboard assets and the JSON files the dashboards read. Everything else 404s.
-_ALLOWED_EXTS = {".html", ".css", ".js", ".ico", ".png", ".svg", ".woff", ".woff2", ".map"}
+#
+# The allowlist is by EXACT FILENAME, not by extension. Matching on extension
+# meant any .html/.js/.css/.map that ever landed in the bot directory became
+# web-servable — a scratch copy, an editor backup, a build artefact, a source
+# map. SimpleHTTPRequestHandler.translate_path blocks `..` traversal, so that
+# was never exploitable, but an allowlist should not lean on a second control
+# to be correct. Source maps in particular exist to hand out original source.
+#
+# Adding an asset here is a deliberate act. Check what the file contains first.
+_ALLOWED_FILES = {
+    "dashboard.html",           # the main SPA
+    "backtest_dashboard.html",  # the backtest viewer
+    "dashboard.css",            # extracted from dashboard.html
+    "dashboard.js",             # extracted from dashboard.html
+    "chart.umd.js",             # vendored Chart.js (the CSP blocks the CDN copy)
+}
 # news_feed.json / social_sentiment.json are fetched directly by the News and
 # Social tabs (their own fast polls, so a headline or sentiment update doesn't
 # wait for the next dashboard_state write).
@@ -171,7 +192,11 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         # these headers add defence-in-depth against clickjacking and MIME sniffing.
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
-        self.send_header("X-XSS-Protection", "1; mode=block")
+        # Explicitly 0, not "1; mode=block". The legacy auditor is deprecated,
+        # and its blocking mode has known bypasses that can introduce
+        # vulnerabilities on pages that would otherwise be safe. Current
+        # guidance is to disable it and rely on the CSP below.
+        self.send_header("X-XSS-Protection", "0")
         # CSP backstop: the dashboards fetch only same-origin JSON and render no
         # remote resources. Pinning to 'self' (plus the inline styles/scripts the
         # single-file dashboard relies on) contains any content injected via an
@@ -199,12 +224,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         # dashboard, never a listing — see list_directory below).
         if name == "":
             return True
-        ext = posixpath.splitext(name)[1].lower()
-        if ext in _ALLOWED_EXTS:
-            return True
-        if name in _ALLOWED_JSON:
-            return True
-        return False
+        return name in _ALLOWED_FILES or name in _ALLOWED_JSON
 
     # ── Optional password (HTTP Basic Auth) ─────────────────────────────────
     def _authorized(self) -> bool:
@@ -218,8 +238,16 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             user, _, pw = base64.b64decode(header[6:]).decode("utf-8", "replace").partition(":")
         except Exception:
             return False
-        # constant-time compare to avoid leaking length/content via timing
-        return hmac.compare_digest(user, _AUTH_USER) and hmac.compare_digest(pw, _AUTH_PASS)
+        # Compare UTF-8 bytes: hmac.compare_digest raises TypeError on a str
+        # containing non-ASCII, so a passphrase with an accented character would
+        # otherwise 500 instead of cleanly denying.
+        #
+        # Both comparisons run unconditionally — `and` would short-circuit on a
+        # wrong username and skip the password compare, making a VALID username
+        # measurably slower and therefore guessable.
+        user_ok = hmac.compare_digest(user.encode("utf-8"), _AUTH_USER.encode("utf-8"))
+        pass_ok = hmac.compare_digest(pw.encode("utf-8"), _AUTH_PASS.encode("utf-8"))
+        return user_ok & pass_ok
 
     def _send_auth_challenge(self) -> None:
         self.send_response(401)
@@ -415,6 +443,44 @@ def _resolve_serve_dir(cli_dir: str | None) -> str:
     return path
 
 
+def _is_loopback_bind(host: str) -> bool:
+    """
+    True only if binding `host` confines the listener to this machine.
+
+    Anything that isn't a literal loopback address is treated as exposed —
+    including "" and "0.0.0.0"/"::", which mean *every* interface. Erring toward
+    "exposed" is the safe direction: a false positive costs a config error, a
+    false negative costs an open kill switch.
+    """
+    host = (host or "").strip()
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return host.lower() == "localhost"
+
+
+def _require_auth_beyond_loopback(bind: str) -> None:
+    """
+    Refuse to listen on a reachable interface without a password.
+
+    /api/control halts the bot and flattens the account, and it is
+    unauthenticated whenever DASH_AUTH_USER/PASS are unset. On a coffee-shop
+    Wi-Fi or a flat office LAN that is a kill switch for anyone who portscans
+    the subnet, so this is a hard exit rather than a warning.
+    """
+    if _is_loopback_bind(bind) or _AUTH_ENABLED:
+        return
+    print("\nERROR: Refusing to bind to a non-loopback address without a password.", file=sys.stderr)
+    print(f"       --bind {bind} would let other machines reach /api/control,", file=sys.stderr)
+    print("       which can halt the bot and flatten every open position.\n", file=sys.stderr)
+    print("       Set BOTH of these in .env (or the environment), then retry:", file=sys.stderr)
+    print("           DASH_AUTH_USER=you", file=sys.stderr)
+    print("           DASH_AUTH_PASS=<a long passphrase>\n", file=sys.stderr)
+    print("       Or drop the flag to keep the dashboard local-only:", file=sys.stderr)
+    print("           python dashboard_server.py\n", file=sys.stderr)
+    sys.exit(2)
+
+
 def _check_expected_files(serve_dir: str) -> None:
     """
     Warn (don't fail) if the dashboard files aren't where we expect them.
@@ -473,7 +539,7 @@ def parse_args() -> argparse.Namespace:
             "  python dashboard_server.py --port 8080           # different port\n"
             "  python dashboard_server.py --no-browser          # don't auto-open browser\n"
             "  python dashboard_server.py --dir A:\\bot\\         # serve a specific folder\n"
-            "  python dashboard_server.py --bind 0.0.0.0        # allow LAN access (use cautiously)\n"
+            "  python dashboard_server.py --bind 0.0.0.0        # LAN access — requires DASH_AUTH_USER/PASS\n"
         )
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
@@ -481,7 +547,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dir", dest="serve_dir", type=str, default=None,
                         help="Directory to serve (default: directory containing this script)")
     parser.add_argument("--bind", type=str, default=DEFAULT_BIND,
-                        help=f"Network interface to bind (default: {DEFAULT_BIND}, loopback only)")
+                        help=f"Network interface to bind (default: {DEFAULT_BIND}, loopback only). "
+                             "Anything beyond loopback requires DASH_AUTH_USER and DASH_AUTH_PASS "
+                             "to be set, or the server refuses to start.")
     parser.add_argument("--no-browser", action="store_true",
                         help="Don't auto-open the dashboard in the default browser")
     parser.add_argument("--page", type=str, default=DEFAULT_PAGE,
@@ -491,6 +559,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    _require_auth_beyond_loopback(args.bind)
 
     serve_dir = _resolve_serve_dir(args.serve_dir)
     os.chdir(serve_dir)  # SimpleHTTPRequestHandler serves from cwd

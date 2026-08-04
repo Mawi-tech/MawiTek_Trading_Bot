@@ -32,6 +32,7 @@ from tradier_client import (
     get_open_positions, get_option_mid, MOCK_MODE,
 )
 from order_manager import place_and_confirm, recover_pending_orders
+from state_io import StateCorruption, abort_on_corruption
 from risk_manager import pre_trade_check, size_contracts, record_trade, reconcile_from_broker
 from position_manager import days_until_expiry
 from trade_journal import record_closed_trade
@@ -528,6 +529,10 @@ def run():
         for r in recover_pending_orders():
             if r.ok and r.filled_qty > 0:
                 log.info("Recovered fill from prior session: %s", r.tag)
+    except StateCorruption as e:
+        # Must precede the catch-all: an unreadable pending ledger means we
+        # cannot know what is in flight at the broker.
+        abort_on_corruption(e, "pead_executor")
     except Exception as e:
         log.warning("Pending-order recovery failed (non-fatal): %s", e)
 
