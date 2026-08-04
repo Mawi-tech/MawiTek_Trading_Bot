@@ -6,7 +6,7 @@ yfinance==0.2.61
 pandas==2.2.3
 ta==0.11.0
 python-dotenv==1.2.2
-requests==2.32.3
+requests==2.33.0
 
 # ── Dev / testing ──────────────────────────────────────────────────────────
-pytest==8.4.2
+pytest==9.0.3
