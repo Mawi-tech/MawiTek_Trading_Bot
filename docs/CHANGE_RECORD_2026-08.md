@@ -69,14 +69,22 @@ These change what the existing limits actually *do*. Several were previously ine
 - Presence of every hardening change confirmed by content inspection of `main`, not by commit subject.
 - `_ALLOWED_EXTS` confirmed absent (0 occurrences); `X-XSS-Protection` confirmed `"0"`.
 
-## 5. Open item
+## 5. Resolved: MIN_SETUP_SCORE
 
-`MIN_SETUP_SCORE = 65` (section 1) reached `main` without its own review. Confirm it is intended.
-To revert it in isolation:
+**Confirmed intended and retained at 65** (owner decision, 2026-08-04). No revert.
 
-```
-git revert --no-commit 84e8a62 -- executor.py   # then re-apply only the StateCorruption hunks
-```
+Strategy 1 (catalyst long calls) now requires a setup score of 65 rather than 50
+before it will trade. The supporting evidence is in the constant's own comment:
+the 50-59 score bucket bled roughly -$541/trade.
 
-Simpler in practice: edit the constant back to `50` in a one-line commit, since `84e8a62`'s other
-change to `executor.py` (the `StateCorruption` import and handler) must stay.
+The concern recorded here was never the value — it was that a parameter governing
+entry frequency reached `main` inside `84e8a62`, a commit about corrupt-state
+handling, because the whole of `executor.py` was staged rather than the intended
+hunks. The value is confirmed; the process note stands as the reason this record
+exists.
+
+Effect on live behaviour: fewer catalyst entries, each higher-conviction. This
+compounds with the two other risk-reducing changes in section 2 — the IV-Rank
+allocation cap now actually binds, and a corrupt `risk_state.json` now halts the
+bot instead of silently clearing the daily-loss flag. Expect a lower trade count
+than the pre-August baseline; that is the intended direction, not a fault.
