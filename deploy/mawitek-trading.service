@@ -1,0 +1,29 @@
+[Unit]
+Description=MawiTek Trading Fleet (start_all.py launcher + strategies)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mawitek
+Group=mawitek
+WorkingDirectory=/home/mawitek/MawiTek_Trading_Bot
+ExecStart=/home/mawitek/MawiTek_Trading_Bot/.venv/bin/python start_all.py
+
+# Clean shutdown: start_all.py catches SIGINT (KeyboardInterrupt) and runs its
+# finally block to stop every child strategy. Send SIGINT to the launcher only
+# (KillMode=mixed), then SIGKILL anything still alive after the timeout.
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=45
+
+Restart=on-failure
+RestartSec=15
+
+# Light hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/home/mawitek/MawiTek_Trading_Bot
+
+[Install]
+WantedBy=multi-user.target

@@ -123,3 +123,7 @@ sec_cik_map.json
 # ── IDE / tooling local state ─────────────────────────────────────────────
 .vs/
 .claude/
+
+.backtest_cache/
+backtest_*.csv
+regime_grid.csv
