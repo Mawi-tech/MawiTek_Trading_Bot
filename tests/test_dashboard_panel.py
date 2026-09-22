@@ -18,9 +18,10 @@ def _write(path, obj):
 def test_build_strategy_panel(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _write("open_positions.json", {"AAPL_C": {"underlying": "AAPL"}})                 # catalyst 1
-    _write("hft_positions.json", [{"underlying": "NVDA"}, {"underlying": "MSFT"}])    # hft 2
+    _write("hft_positions.json", [{"underlying": "NVDA", "symbol": "NVDA_C"},
+                                   {"underlying": "MSFT", "symbol": "MSFT_C"}])        # hft 2
     _write("iv_rank_positions.json", [])
-    _write("pead_positions.json", [{"underlying": "AMD"}])                            # pead 1
+    _write("pead_positions.json", [{"underlying": "AMD", "symbol": "AMD_C"}])         # pead 1
     _write("bounce_positions.json", [])                                               # bounce 0
     _write("vwap_fade_positions.json", [])                                            # vwap_fade 0
 
@@ -37,7 +38,19 @@ def test_build_strategy_panel(tmp_path, monkeypatch):
         {"strategy": "catalyst_long_call", "pnl_dollar": -40},
         {"strategy": "pead", "pnl_dollar": 250},
     ]
-    panel = ds.build_strategy_panel(equity=100_000, closed_trades=closed)
+    # The panel's per-strategy "positions" count is derived from the same
+    # broker-truth, tagged positions list Overview shows (see
+    # tag_positions_with_strategy) — NOT from re-reading each book file — so
+    # the two screens can't silently disagree. Build that list to match the
+    # book files above.
+    positions = [
+        {"legs": [{"symbol": "AAPL_C"}]},
+        {"legs": [{"underlying": "NVDA", "symbol": "NVDA_C"}]},
+        {"legs": [{"symbol": "MSFT_C"}]},
+        {"legs": [{"symbol": "AMD_C"}]},
+    ]
+    ds.tag_positions_with_strategy(positions)
+    panel = ds.build_strategy_panel(equity=100_000, closed_trades=closed, positions=positions)
 
     # Six strategies now: catalyst, iv_rank, hft, pead, bounce, vwap_fade.
     assert len(panel["health"]) == 6 and len(panel["strategies"]) == 6
@@ -171,6 +184,42 @@ def test_strategy_panel_carries_unrealized(tmp_path, monkeypatch):
     by = {s["key"]: s for s in panel["strategies"]}
     assert by["catalyst_long_call"]["unrealized"] == 95
     assert panel["unrealized_unattributed"] == 0.0
+
+
+def test_strategy_panel_position_counts_reconcile_with_overview(tmp_path, monkeypatch):
+    """Regression: the Strategies tab used to count len(book file) per strategy,
+    which could silently drift from Overview's broker-truth count (e.g. a
+    position missing from iv_rank_positions.json due to a failed write or a
+    reconciliation drop) even though the position was still open at the
+    broker. The panel must now derive counts from the same tagged positions
+    list Overview renders, so the two can never disagree."""
+    monkeypatch.chdir(tmp_path)
+    # IV-Rank's book is missing one leg pair vs. what's actually open at the
+    # broker (simulating the reported bug) — book-based counting would say 1,
+    # but Overview (and therefore this panel) sees 2 broker positions tagged
+    # iv_rank plus one nobody's book claims.
+    _write("iv_rank_positions.json", [
+        {"strategy": "bull_put_spread", "ticker": "NVDA",
+         "legs": [{"symbol": "NVDA_P1"}, {"symbol": "NVDA_P2"}]},
+    ])
+    monkeypatch.setattr(hb, "read_heartbeats", lambda: {})
+    monkeypatch.setattr(rm, "deployed_capital_by_strategy", lambda: {})
+    monkeypatch.setattr(ds, "_market_regime", lambda: {"state": "bull", "detail": "t"})
+
+    positions = [
+        {"legs": [{"symbol": "NVDA_P1"}, {"symbol": "NVDA_P2"}]},   # in the book -> iv_rank
+        {"legs": [{"symbol": "AMD_P1"}, {"symbol": "AMD_P2"}]},     # NOT in any book -> unattributed
+    ]
+    ds.tag_positions_with_strategy(positions)
+    panel = ds.build_strategy_panel(equity=100_000, closed_trades=[], positions=positions)
+
+    by = {s["key"]: s for s in panel["strategies"]}
+    assert by["iv_rank"]["positions"] == 1
+    total_tagged = sum(s["positions"] for s in panel["strategies"])
+    unattributed = sum(1 for p in positions if p["strategy"] == "unattributed")
+    # This is the invariant that was broken: Overview's open_count is
+    # len(positions), so it must equal tagged strategy counts + unattributed.
+    assert total_tagged + unattributed == len(positions)
 
 
 def test_deployed_capital_includes_iv_rank(tmp_path, monkeypatch):

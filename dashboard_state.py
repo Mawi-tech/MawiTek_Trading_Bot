@@ -733,7 +733,7 @@ def build_strategy_panel(equity: float, closed_trades: list[dict],
     """
     from heartbeat import read_heartbeats
     from risk_manager import (
-        STRATEGY_ALLOCATION_PCT, deployed_capital_by_strategy, _count_book,
+        STRATEGY_ALLOCATION_PCT, deployed_capital_by_strategy,
         MAX_POSITIONS_PER_GROUP, correlation_group, _open_underlyings,
     )
 
@@ -744,6 +744,18 @@ def build_strategy_panel(equity: float, closed_trades: list[dict],
     if positions and not positions[0].get("strategy"):    # ensure attribution for direct callers
         tag_positions_with_strategy(positions)
     unreal    = unrealized_by_strategy(positions)         # open P&L per strategy
+
+    # Per-strategy open-position count, derived from the SAME broker-truth
+    # positions Overview shows (grouped + tagged), not from each strategy's
+    # local book file. The book (_count_book) can drift from the broker (a
+    # failed write, a reconciliation drop, a manual trade) which would make
+    # this tab silently under/over-count vs. the Overview total; counting
+    # the tagged positions instead keeps the two screens reconcilable by
+    # construction — sum(strategy counts) + unattributed == Overview's count.
+    positions_by_strategy: dict[str, int] = {}
+    for pos in positions:
+        strat = pos.get("strategy") or "unattributed"
+        positions_by_strategy[strat] = positions_by_strategy.get(strat, 0) + 1
 
     # Realized stats per strategy from the closed-trade journal.
     stats: dict[str, dict] = {}
@@ -772,7 +784,7 @@ def build_strategy_panel(equity: float, closed_trades: list[dict],
         st  = stats.get(key, {"trades": 0, "wins": 0, "pnl": 0.0})
         strategies.append({
             "key": key, "name": name,
-            "positions": _count_book(book, is_list=is_list),
+            "positions": positions_by_strategy.get(key, 0),
             "deployed":  round(dep, 2),
             "cap":       round(cap, 2),
             "alloc_pct": round(STRATEGY_ALLOCATION_PCT.get(key, 0) * 100),
