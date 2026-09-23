@@ -37,13 +37,23 @@ import sys
 import time
 from pathlib import Path
 
+# Where the dashboard/control server listens. Loopback by default, so a desktop
+# or a laptop can never expose the control API by accident. A VPS sets
+# DASH_BIND=0.0.0.0 so Tailscale can reach it, and leans on the firewall to keep
+# port 8000 tailnet-only — see deploy/DEPLOY_VPS.md §2.
+#
+# An environment variable rather than an edit to COMPONENTS below, because a
+# deploy that requires editing source loses that edit on the next `git pull`,
+# and the symptom is a control API that silently stops answering.
+_DASH_BIND = os.getenv("DASH_BIND", "127.0.0.1")
+
 # ─── Component registry ─────────────────────────────────────────────────────────
 # Order matters: dashboard first so the bots can write to it as they start up.
 
 COMPONENTS: dict[str, dict] = {
     "dashboard": {
         "script":  "dashboard_server.py",
-        "args":    ["--no-browser"],
+        "args":    ["--no-browser", "--bind", _DASH_BIND],
         "label":   "Dashboard server",
         "needs_broker": False,
     },

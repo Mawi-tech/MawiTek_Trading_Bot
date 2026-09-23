@@ -10,6 +10,17 @@ Group=mawitek
 WorkingDirectory=/home/mawitek/MawiTek_Trading_Bot
 ExecStart=/home/mawitek/MawiTek_Trading_Bot/.venv/bin/python start_all.py
 
+# Bind the dashboard/control API beyond loopback so Tailscale can reach it.
+# start_all.py does not read .env (it only text-scans it), so this has to be a
+# real process variable rather than a line in that file.
+#
+# This is only safe because DEPLOY_VPS.md configures ufw to deny inbound and
+# then allows 8000 on tailscale0 alone, BEFORE this unit is installed. If you
+# install this unit on a host without that firewall, the control API is
+# reachable from the public internet behind nothing but basic auth. Verify
+# with the external check in DEPLOY_VPS.md §6 rather than assuming.
+Environment=DASH_BIND=0.0.0.0
+
 # Clean shutdown: start_all.py catches SIGINT (KeyboardInterrupt) and runs its
 # finally block to stop every child strategy. Send SIGINT to the launcher only
 # (KillMode=mixed), then SIGKILL anything still alive after the timeout.
