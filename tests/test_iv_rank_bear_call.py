@@ -114,6 +114,7 @@ def _wire_chain(monkeypatch, chain):
     monkeypatch.setattr(ivr, "get_options_expirations", lambda t: [exp])
     monkeypatch.setattr(ivr, "get_options_chain", lambda t, e: chain)
     monkeypatch.setattr(ivr, "PREFER_IRON_CONDOR", False)
+    monkeypatch.setattr(ivr, "_next_earnings_date", lambda t: None)   # no network
 
 
 def _vertical_chain():

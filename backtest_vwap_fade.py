@@ -34,6 +34,7 @@ import vwap_fade_scanner as vf
 from vwap_fade_scanner import compute_vwap, detect_vwap_fade, in_fade_session, INVERSE_ETF_LIST
 from backtest_hft import (
     _bs_price, _get_intraday_yf, _get_hist_iv, _interval_minutes, fetch_sp500_tickers,
+    _session_minutes_to_dte_days,
 )
 from market_data import get_intraday_bars
 import vwap_fade_executor as ex
@@ -88,7 +89,7 @@ def backtest_ticker(ticker: str, days: int = DEFAULT_DAYS, interval: str = DEFAU
     trades: list[dict] = []
     last_entry_bar = -MIN_BARS_BETWEEN_ENTRIES
     bar_minutes = _interval_minutes(interval)
-    bar_days    = bar_minutes / (60.0 * 24.0)
+    bar_days    = _session_minutes_to_dte_days(bar_minutes)
 
     for i in range(vf.MIN_BARS, len(df) - 1):
         if i - last_entry_bar < MIN_BARS_BETWEEN_ENTRIES:
@@ -115,11 +116,11 @@ def backtest_ticker(ticker: str, days: int = DEFAULT_DAYS, interval: str = DEFAU
         if entry_price <= 0 or entry_vwap <= 0:
             continue
         entry_pct = (entry_price - entry_vwap) / entry_vwap * 100
-        iv = _get_hist_iv(window["Close"])
+        iv = _get_hist_iv(window["Close"], bar_minutes=bar_minutes)
 
         # Same-day expiry (0-DTE realism): option life = minutes to 16:00 ET.
         mins_to_close  = max(bar_minutes, (16 * 60) - (bar_time.hour * 60 + bar_time.minute))
-        entry_dte_days = mins_to_close / (60.0 * 24.0)
+        entry_dte_days = _session_minutes_to_dte_days(mins_to_close)
         entry_val = _bs_price(entry_price, entry_price, iv, entry_dte_days, kind)
         if entry_val <= 0:
             continue

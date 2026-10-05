@@ -182,6 +182,10 @@ RISK_PER_TRADE_PCT  = 0.01      # 1% of account per trade (intraday sizing)
 # Asymmetric exits — see hft_executor.py. Validated Jun 2026: flips the strategy
 # from PF ~1.0 (breakeven/negative) to PF ~1.6 on two independent samples by
 # letting convex option winners run while cutting losers fast.
+# CAVEAT (Oct 2026): those PF figures — and the later "theta-honest" mega/broad
+# results that re-enabled hft_intraday — were produced on the calendar-clock
+# pricing bug (see _session_minutes_to_dte_days), under which random entries on
+# driftless prices also scored PF > 1. Re-run before relying on them.
 TAKE_PROFIT_PCT     = 1.00      # was 0.30
 STOP_LOSS_PCT       = 0.20      # was 0.25
 MAX_HOLD_BARS       = 12        # ~60 min at 5m bars (was 9 / ~45 min)
@@ -217,6 +221,24 @@ def _bs_price(spot: float, strike: float, iv: float, dte_days: float,
         return max(0.0, spot * nd1 - strike * nd2)
     # Put via parity (r=0): P = C - S + K  →  K*N(-d2) - S*N(-d1)
     return max(0.0, strike * (1 - nd2) - spot * (1 - nd1))
+
+
+SESSION_MINUTES = 390      # 09:30–16:00 ET
+TRADING_DAYS    = 252
+
+
+def _session_minutes_to_dte_days(minutes: float) -> float:
+    """
+    Convert minutes of REGULAR SESSION time into the calendar-day units that
+    _bs_price expects (it divides by 365).
+
+    _get_hist_iv annualises over trading time (252 days x 390 minutes), so the
+    option's remaining life must be measured on that same clock. Converting
+    session minutes as calendar time (minutes / 1440) instead understates the
+    variance left in a 0-DTE option ~5.4x, pricing it ~2.3x too cheap — and a
+    backtest that buys underpriced options profits on random entries.
+    """
+    return minutes / (SESSION_MINUTES * TRADING_DAYS) * 365.0
 
 
 def _interval_minutes(interval: str) -> int:
@@ -258,16 +280,16 @@ def _get_intraday_yf(ticker: str, days: int, interval: str = "5m"):
         return None
 
 
-def _get_hist_iv(close: pd.Series, window: int = 20) -> float:
-    """Annualised HV from last `window` bars of close prices."""
+def _get_hist_iv(close: pd.Series, window: int = 20, bar_minutes: int = 5) -> float:
+    """Annualised HV (trading-time) from the last `window` intraday bar returns."""
     if len(close) < window + 1:
         return 0.30   # Default 30% vol if insufficient data
     log_ret = np.log(close / close.shift(1)).dropna()
-    daily_std = float(log_ret.tail(window).std())
-    # Intraday bars need different annualisation
-    # For 5m bars: 78 bars/day → sqrt(252 * 78)
-    bars_per_day = 78  # approx for 5m
-    return daily_std * math.sqrt(252 * bars_per_day)
+    bar_std = float(log_ret.tail(window).std())
+    # One trading year = TRADING_DAYS sessions of SESSION_MINUTES / bar_minutes
+    # bars (78 for 5m bars, 390 for 1m).
+    bars_per_day = SESSION_MINUTES / max(1, bar_minutes)
+    return bar_std * math.sqrt(TRADING_DAYS * bars_per_day)
 
 
 # --- Single-Ticker Backtest ----------------------------------------------------
@@ -355,11 +377,11 @@ def backtest_ticker(
         # close (0-DTE realism: the live strategy prefers same-day expiries).
         kind   = "call" if direction == "bullish" else "put"
         strike = entry_price                          # ~ATM
-        iv     = _get_hist_iv(window["Close"])
+        iv     = _get_hist_iv(window["Close"], bar_minutes=bar_minutes)
 
         mins_to_close  = max(bar_minutes,
                              (16 * 60) - (entry_time.hour * 60 + entry_time.minute))
-        entry_dte_days = mins_to_close / (60.0 * 24.0)
+        entry_dte_days = _session_minutes_to_dte_days(mins_to_close)
 
         entry_val = _bs_price(entry_price, strike, iv, entry_dte_days, kind)
         if entry_val <= 0:
@@ -372,7 +394,7 @@ def backtest_ticker(
 
         # Simulate forward bars; TP/SL decided on the THETA-AWARE option value
         # (dte shrinks each bar), not a linear stock-move proxy.
-        bar_days     = bar_minutes / (60.0 * 24.0)
+        bar_days     = _session_minutes_to_dte_days(bar_minutes)
         exit_bar_idx = None
         exit_reason  = "time_stop"
 

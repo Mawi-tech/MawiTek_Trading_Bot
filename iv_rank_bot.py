@@ -149,6 +149,16 @@ BULL_PUT_MIN_CREDIT_FRAC = 0.33       # require credit ≥ 1/3 of width, else sk
 # actually getting filled: buys at mid*(1+x), sells at mid*(1-x).
 LEG_FILL_BUFFER     = 0.04
 
+# Earnings gate for premium selling. A high IV rank is very often just the
+# earnings bump in the 20–45 DTE expiry, so without this the "sell rich IV"
+# signal is largely the earnings iron-condor seller that was backtested and
+# rejected (backtest_crush.py). The soft stop can't act on an overnight gap, so
+# a short strike ~0.30–0.45 delta from spot can go straight to max loss. Skip a
+# premium sale when the next earnings date falls on or before the day the
+# position would be force-closed (expiration − IVR_MIN_DTE_EXIT). Fails open: an
+# unknown earnings date never blocks a trade.
+SKIP_EARNINGS_IN_HOLD = True
+
 
 # --- Position Book -------------------------------------------------------------
 # IV-rank positions are multi-leg, so they can't live in open_positions.json
@@ -444,6 +454,13 @@ def select_credit_spread_legs(
     if not target_exp:
         return None
 
+    if signal == "sell_premium" and SKIP_EARNINGS_IN_HOLD:
+        earn = _earnings_before_exit(ticker, target_exp, today)
+        if earn:
+            print(f"[IVRank] {ticker}: earnings {earn.isoformat()} falls inside the "
+                  f"{target_exp} hold — skipping premium sale (can't stop out of a gap)")
+            return None
+
     chain = get_options_chain(ticker, target_exp)
     if not chain:
         return None
@@ -470,6 +487,31 @@ def select_credit_spread_legs(
         return _select_long_straddle(chain, stock_price, target_exp, dte)
 
     return None
+
+
+def _next_earnings_date(ticker: str) -> datetime.date | None:
+    from earnings_provider import get_earnings_date
+    return get_earnings_date(ticker)
+
+
+def _earnings_before_exit(
+    ticker: str, expiration: str, today: datetime.date
+) -> datetime.date | None:
+    """
+    The next earnings date if it lands between today and the position's forced
+    exit (expiration − IVR_MIN_DTE_EXIT), else None. Fail-open: a lookup error
+    or unknown date returns None, so missing data never blocks a trade.
+    """
+    try:
+        earn = _next_earnings_date(ticker)
+    except Exception as e:
+        print(f"[IVRank] {ticker}: earnings lookup failed ({e}) — not gating")
+        return None
+    if not earn:
+        return None
+    last_held = (datetime.date.fromisoformat(expiration)
+                 - datetime.timedelta(days=IVR_MIN_DTE_EXIT))
+    return earn if today <= earn <= last_held else None
 
 
 def _market_is_weak() -> bool:
