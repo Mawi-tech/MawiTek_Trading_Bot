@@ -63,7 +63,9 @@ the one-sided vertical fallback is **market-aware**: a bull-put spread in a heal
 `market_regime.is_market_weak()` — bear regime or a weak/red intraday tape. On a weak day where the
 bear-call can't be built, it places **nothing** rather than the bullish bull-put. The bear-call side is
 gated behind `ENABLE_BEAR_CALL` (off until `backtest_iv_rank_directional.py` passes on two independent
-samples — until then a weak-day fallback simply skips). Buys the long protection wing(s) **first** (no
+samples — until then a weak-day fallback simply skips). A premium sale is **skipped when the next
+earnings date falls on or before the position's forced exit** (`SKIP_EARNINGS_IN_HOLD`; fails open
+when the date is unknown) — a soft stop can't act on an overnight gap. Buys the long protection wing(s) **first** (no
 naked-short risk on a partial fill), then sells the short leg(s). Own multi-leg book
 (`iv_rank_positions.json`). Exits (all credit structures share them): take profit at **50% of credit
 captured**, stop at **2× credit**, or time-stop at **≤7 DTE**. This is the validated short-vol edge
