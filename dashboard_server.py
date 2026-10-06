@@ -143,6 +143,13 @@ _JSON_CONTENT_TYPE = "application/json"
 # Host values that can only mean "this machine". Anything else reaching us is
 # either a rebinding attack or a misconfigured proxy — neither should mutate state.
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+# The one non-loopback Host also accepted: the literal IP the server is bound
+# to, when --bind names a specific address (a Tailscale IP, so the Discord bot
+# on another host can reach /api/control). Set by main(). Rebinding stays
+# closed, because a rebound attacker domain arrives with that DOMAIN as its
+# Host, never the bare IP. Wildcard binds set nothing — "every interface" names
+# no address to trust.
+_BOUND_HOST: str | None = None
 # Sec-Fetch-Site values a legitimate dashboard request can carry. "none" is a
 # direct navigation (address bar); "same-origin" is our own page's fetch().
 _SAFE_FETCH_SITES = {"same-origin", "none"}
@@ -311,7 +318,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
 
         # 3. DNS rebinding. 421 Misdirected Request is the precise status: the
         #    request arrived at a server that does not serve that authority.
-        if host not in _LOOPBACK_HOSTS:
+        if host not in _LOOPBACK_HOSTS and host != _BOUND_HOST:
             self._send_json(421, {"ok": False, "error": "unrecognised Host header"})
             return True
 
@@ -459,6 +466,23 @@ def _is_loopback_bind(host: str) -> bool:
         return host.lower() == "localhost"
 
 
+def _bound_host_alias(bind: str) -> str | None:
+    """
+    The Host value a remote caller uses for a specific-address bind, or None.
+
+    Only a literal, non-loopback, non-wildcard IP qualifies. Formatted the way
+    _host_only() reports it, so the two compare directly: IPv6 bracketed,
+    everything compressed.
+    """
+    try:
+        ip = ipaddress.ip_address((bind or "").strip().strip("[]"))
+    except ValueError:
+        return None
+    if ip.is_unspecified or ip.is_loopback:
+        return None
+    return f"[{ip.compressed}]" if ip.version == 6 else ip.compressed
+
+
 def _require_auth_beyond_loopback(bind: str) -> None:
     """
     Refuse to listen on a reachable interface without a password.
@@ -561,6 +585,9 @@ def main() -> None:
     args = parse_args()
 
     _require_auth_beyond_loopback(args.bind)
+
+    global _BOUND_HOST
+    _BOUND_HOST = _bound_host_alias(args.bind)
 
     serve_dir = _resolve_serve_dir(args.serve_dir)
     os.chdir(serve_dir)  # SimpleHTTPRequestHandler serves from cwd
