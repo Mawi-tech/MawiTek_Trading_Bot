@@ -150,6 +150,16 @@ _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 # Host, never the bare IP. Wildcard binds set nothing — "every interface" names
 # no address to trust.
 _BOUND_HOST: str | None = None
+# Names a proxy forwards as Host. Tailscale Serve keeps the caller's Host, so a
+# request through https://<machine>.<tailnet>.ts.net arrives here as that name
+# even though the server itself is loopback-only. List them in .env as
+# DASH_ALLOWED_HOSTS=a.tailnet.ts.net,b.tailnet.ts.net. Safe against rebinding
+# for the same reason as above: an attacker cannot own a name in your tailnet.
+_EXTRA_HOSTS = frozenset(
+    h.strip().lower().rstrip(".")
+    for h in os.getenv("DASH_ALLOWED_HOSTS", "").split(",")
+    if h.strip()
+)
 # Sec-Fetch-Site values a legitimate dashboard request can carry. "none" is a
 # direct navigation (address bar); "same-origin" is our own page's fetch().
 _SAFE_FETCH_SITES = {"same-origin", "none"}
@@ -318,7 +328,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
 
         # 3. DNS rebinding. 421 Misdirected Request is the precise status: the
         #    request arrived at a server that does not serve that authority.
-        if host not in _LOOPBACK_HOSTS and host != _BOUND_HOST:
+        if host not in _LOOPBACK_HOSTS and host != _BOUND_HOST and host not in _EXTRA_HOSTS:
             self._send_json(421, {"ok": False, "error": "unrecognised Host header"})
             return True
 
@@ -505,6 +515,20 @@ def _require_auth_beyond_loopback(bind: str) -> None:
     sys.exit(2)
 
 
+def _require_auth_for_proxied_hosts() -> None:
+    """
+    Same rule for DASH_ALLOWED_HOSTS: listing a proxy's hostname is opting
+    into remote /api/control, even though the bind itself is loopback.
+    """
+    if not _EXTRA_HOSTS or _AUTH_ENABLED:
+        return
+    print("\nERROR: DASH_ALLOWED_HOSTS is set but DASH_AUTH_USER/PASS are not.", file=sys.stderr)
+    print(f"       {', '.join(sorted(_EXTRA_HOSTS))} would let other machines", file=sys.stderr)
+    print("       reach /api/control with no password. Set both, or remove", file=sys.stderr)
+    print("       DASH_ALLOWED_HOSTS.\n", file=sys.stderr)
+    sys.exit(2)
+
+
 def _check_expected_files(serve_dir: str) -> None:
     """
     Warn (don't fail) if the dashboard files aren't where we expect them.
@@ -585,6 +609,7 @@ def main() -> None:
     args = parse_args()
 
     _require_auth_beyond_loopback(args.bind)
+    _require_auth_for_proxied_hosts()
 
     global _BOUND_HOST
     _BOUND_HOST = _bound_host_alias(args.bind)

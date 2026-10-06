@@ -94,3 +94,43 @@ def test_alias_matches_host_only_format():
     assert dsrv._host_only(f"{TS_IP}:8000") == dsrv._bound_host_alias(TS_IP)
     assert (dsrv._host_only("[fd7a:115c:a1e0::1]:8000")
             == dsrv._bound_host_alias("fd7a:115c:a1e0::1"))
+
+
+# ── DASH_ALLOWED_HOSTS: names a proxy (Tailscale Serve) forwards as Host ──────
+
+SERVE_NAME = "mybox.tailnet.ts.net"
+
+
+def test_listed_proxy_name_accepted(server, monkeypatch):
+    """Tailscale Serve keeps the caller's Host — verified against a live Serve."""
+    monkeypatch.setattr(dsrv, "_EXTRA_HOSTS", frozenset({SERVE_NAME}))
+    assert _post_status(server, SERVE_NAME) == 200
+
+
+def test_unlisted_proxy_name_rejected(server, monkeypatch):
+    monkeypatch.setattr(dsrv, "_EXTRA_HOSTS", frozenset())
+    assert _post_status(server, SERVE_NAME) == 421
+
+
+def test_listed_name_does_not_admit_lookalikes(server, monkeypatch):
+    monkeypatch.setattr(dsrv, "_EXTRA_HOSTS", frozenset({SERVE_NAME}))
+    assert _post_status(server, f"{SERVE_NAME}.evil.example.com") == 421
+
+
+def test_proxied_hosts_require_auth(monkeypatch):
+    monkeypatch.setattr(dsrv, "_EXTRA_HOSTS", frozenset({SERVE_NAME}))
+    monkeypatch.setattr(dsrv, "_AUTH_ENABLED", False)
+    with pytest.raises(SystemExit):
+        dsrv._require_auth_for_proxied_hosts()
+
+
+def test_proxied_hosts_with_auth_start(monkeypatch):
+    monkeypatch.setattr(dsrv, "_EXTRA_HOSTS", frozenset({SERVE_NAME}))
+    monkeypatch.setattr(dsrv, "_AUTH_ENABLED", True)
+    dsrv._require_auth_for_proxied_hosts()
+
+
+def test_no_proxied_hosts_needs_no_auth(monkeypatch):
+    monkeypatch.setattr(dsrv, "_EXTRA_HOSTS", frozenset())
+    monkeypatch.setattr(dsrv, "_AUTH_ENABLED", False)
+    dsrv._require_auth_for_proxied_hosts()
