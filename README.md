@@ -121,7 +121,7 @@ BACKTESTING
   backtest_dashboard.html  Backtest results viewer
 
 TESTS
-  tests/                   pytest suite (328 tests, runs in MOCK_MODE, no network)
+  tests/                   pytest suite (702 tests, runs in MOCK_MODE, no network)
 ```
 
 ## Quick Start
@@ -224,7 +224,7 @@ python earnings_provider.py lookup AAPL NVDA         # earnings dates (API + cac
 python backtest_hft.py --tickers SPY QQQ AAPL TSLA --days 30   # validate HFT triggers
 python backtest_pead.py --days 730                              # validate PEAD strategy
 python backtest_bounce.py                                       # validate the bounce strategy
-python -m pytest tests/ -q                            # run the test suite (328 tests)
+python -m pytest tests/ -q                            # run the test suite (702 tests)
 ```
 
 > The HFT backtest reports a **by-conviction** breakdown (proven VWAP+ORB+spike trio
